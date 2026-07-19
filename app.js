@@ -1633,6 +1633,54 @@ async function refreshSavedList() {
   }
 }
 
+/* ===== 전체 백업 (모든 프로젝트 + 현재 캔버스 + 팔레트) ===== */
+$('btn-backup-export').addEventListener('click', async () => {
+  let projects = [];
+  try {
+    projects = (await dbReq('projects', 'readonly', s => s.getAll())) || [];
+  } catch (_) { /* 프로젝트가 없어도 계속 */ }
+  const backup = {
+    app: 'tile-editor-backup',
+    version: 1,
+    exported: Date.now(),
+    master: masterPalette.slice(),
+    current: serializeDoc(),
+    projects,
+  };
+  const blob = new Blob([JSON.stringify(backup)], { type: 'application/json' });
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `tile-editor-backup-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+});
+
+$('backup-import').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const backup = JSON.parse(await file.text());
+    if (backup.app !== 'tile-editor-backup' || !backup.current) throw new Error('bad format');
+    if (backup.master && backup.master.length >= 2) setMasterPalette(backup.master.slice());
+    // 저장된 프로젝트는 지우지 않고 백업분을 추가 (id 충돌 방지 위해 새 id 발급)
+    for (const p of backup.projects || []) {
+      const { id, ...rest } = p;
+      await dbReq('projects', 'readwrite', s => s.add(rest));
+    }
+    await loadDoc(backup.current);
+    state.projectId = null;
+    refreshSavedList();
+    autosaveSoon();
+  } catch (_) {
+    alert('백업 파일을 읽지 못했습니다. 이 앱에서 내보낸 .json 파일인지 확인해주세요.');
+  }
+});
+
 /* ===== 서랍 UI ===== */
 function closeDrawers() {
   document.querySelectorAll('.drawer').forEach(d => d.classList.add('hidden'));

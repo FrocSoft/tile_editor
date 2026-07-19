@@ -6,7 +6,7 @@
  * - CACHE_VERSION을 올리면 이전 캐시가 정리되고 새로 받는다
  */
 
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const CACHE_NAME = `glitch-tile-${CACHE_VERSION}`;
 
 const CORE = [
