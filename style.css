@@ -1,0 +1,262 @@
+:root {
+  --bg: #1a1b26;
+  --panel: #24283b;
+  --panel2: #2f3450;
+  --fg: #c0caf5;
+  --accent: #7aa2f7;
+  --danger: #f7768e;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Apple SD Gothic Neo", sans-serif;
+  /* iOS의 더블탭 확대·스크롤 바운스 차단 */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  overscroll-behavior: none;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding-top: var(--safe-top);
+  padding-bottom: var(--safe-bottom);
+}
+
+#topbar, #toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  padding: 6px 10px;
+  background: var(--panel);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+#zoom-label { font-size: 13px; opacity: 0.6; min-width: 44px; text-align: right; }
+#size-value { font-size: 13px; opacity: 0.8; min-width: 48px; }
+.size-label { font-size: 12px; opacity: 0.6; }
+
+#offline-badge {
+  font-size: 12px;
+  background: #414868;
+  padding: 3px 8px;
+  border-radius: 10px;
+}
+
+/* 터치하기 좋은 44pt 이상 버튼 */
+button.tool {
+  min-width: 44px;
+  min-height: 44px;
+  font-size: 19px;
+  border: none;
+  border-radius: 10px;
+  background: var(--panel2);
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+button.tool.small { min-width: 38px; min-height: 38px; font-size: 16px; }
+button.tool.active { background: var(--accent); color: #1a1b26; }
+button.tool:active { opacity: 0.7; }
+
+/* 레이어 세그먼트 */
+.seg { display: flex; border-radius: 10px; overflow: hidden; }
+.seg-btn {
+  min-width: 48px;
+  min-height: 44px;
+  border: none;
+  background: var(--panel2);
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 700;
+}
+.seg-btn.active { background: var(--accent); color: #1a1b26; }
+#vis-bg.off, #vis-sprite.off { opacity: 0.35; }
+#vis-bg.active, #vis-sprite.active { background: var(--panel2); color: var(--fg); }
+
+#stage {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+  background:
+    repeating-conic-gradient(#16161e 0% 25%, #1f2335 0% 50%) 0 0 / 24px 24px;
+}
+
+#canvas { position: absolute; top: 0; left: 0; touch-action: none; }
+
+/* 선택 액션 바 */
+#selection-bar {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 12px;
+  display: flex;
+  gap: 8px;
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+#selection-bar button {
+  min-height: 44px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 8px;
+  background: var(--panel2);
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+}
+#selection-bar #sel-delete { color: var(--danger); }
+#selection-bar #sel-done { background: var(--accent); color: #1a1b26; }
+
+/* 소스 패널 */
+#source-panel {
+  flex-shrink: 0;
+  background: var(--panel);
+  border-top: 1px solid #16161e;
+}
+#source-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+}
+#source-name { flex: 1; font-size: 13px; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip {
+  min-height: 36px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 18px;
+  background: var(--accent);
+  color: #1a1b26;
+  font-size: 13px;
+  font-weight: 600;
+}
+#source-body {
+  overflow-y: auto;
+  max-height: 22vh;
+  padding: 0 10px 8px;
+  touch-action: pan-y;
+}
+#source-panel.collapsed #source-body { display: none; }
+#source-canvas { display: block; margin: 0 auto; touch-action: none; image-rendering: pixelated; }
+
+#toolbar { border-top: 1px solid #16161e; }
+
+#brush-preview {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  background:
+    repeating-conic-gradient(#16161e 0% 25%, #2f3450 0% 50%) 0 0 / 12px 12px;
+  image-rendering: pixelated;
+}
+
+/* 서랍 공통 */
+.drawer {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  z-index: 10;
+}
+.drawer.hidden { display: none; }
+.drawer-panel {
+  width: min(400px, 88vw);
+  height: 100%;
+  background: var(--panel);
+  padding: calc(16px + var(--safe-top)) 16px calc(16px + var(--safe-bottom));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  touch-action: pan-y;
+}
+.drawer-panel h2 { font-size: 20px; }
+.drawer-panel h3 { font-size: 15px; opacity: 0.8; margin-top: 8px; }
+.drawer-row { display: flex; gap: 8px; }
+.drawer-row input[type="text"] {
+  flex: 1;
+  min-height: 44px;
+  border-radius: 10px;
+  border: 1px solid var(--panel2);
+  background: var(--bg);
+  color: var(--fg);
+  padding: 0 12px;
+  font-size: 16px;
+}
+button.big, .file-label {
+  min-height: 44px;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #1a1b26;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+}
+.file-label { display: block; }
+
+/* 에셋 브라우저 */
+.asset-folder h4 { font-size: 14px; opacity: 0.8; margin: 8px 0 6px; }
+.asset-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.asset-item {
+  border: 2px solid transparent;
+  border-radius: 10px;
+  background: var(--panel2);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 88px;
+}
+.asset-item.active { border-color: var(--accent); }
+.asset-item img {
+  width: 72px;
+  height: 56px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+.asset-item span {
+  font-size: 11px;
+  color: var(--fg);
+  max-width: 76px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 저장 목록 */
+#saved-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+#saved-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel2);
+  border-radius: 10px;
+  padding: 8px;
+}
+#saved-list canvas { width: 56px; height: 42px; border-radius: 6px; image-rendering: pixelated; background: #fff2; }
+#saved-list .name { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
+#saved-list button { min-width: 44px; min-height: 44px; border: none; border-radius: 8px; background: var(--bg); color: var(--fg); font-size: 15px; }
+.hint { font-size: 12px; opacity: 0.6; line-height: 1.5; }

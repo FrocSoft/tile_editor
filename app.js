@@ -1,0 +1,1237 @@
+'use strict';
+
+/* =====================================================================
+ * Glitch Tile Editor
+ * - 이미지를 8×8 타일로 분절해 아틀라스에 누적하고, 타일(또는 타일 블록)을
+ *   브러시로 BG/SPR 두 레이어 캔버스에 찍는 글리치 그래픽 편집기.
+ * ===================================================================== */
+
+const TILE = 8;           // 분절 단위(px), 고정
+const ATLAS_COLS = 16;    // 아틀라스 한 행의 타일 수
+const MAX_UNDO = 100;
+const MIN_GRID = 1, MAX_GRID = 256;
+
+/* ===== 상태 ===== */
+const state = {
+  gridW: 32,
+  gridH: 24,
+  bg: null,               // Int32Array, 값 = 아틀라스 인덱스, -1 = 빈 셀
+  sprite: null,
+  activeLayer: 'sprite',
+  visible: { bg: true, sprite: true },
+  tool: 'stamp',
+  brush: null,            // {w, h, cells: Int32Array}
+  source: null,           // {name, w, h, cells: Int32Array}
+  srcSel: null,           // 소스 패널 선택 {x, y, w, h}
+  sel: null,              // 캔버스 선택 {x, y, w, h}
+  floating: null,         // 이동 중인 선택 {x, y, w, h, cells, canvas}
+  showGrid: true,
+  zoom: 1,
+  panX: 0,
+  panY: 0,
+  undoStack: [],
+  redoStack: [],
+  projectName: '무제',
+  projectId: null,
+};
+
+/* ===== DOM ===== */
+const $ = (id) => document.getElementById(id);
+const canvas = $('canvas');
+const ctx = canvas.getContext('2d');
+const stage = $('stage');
+const sourceCanvas = $('source-canvas');
+const sourceCtx = sourceCanvas.getContext('2d');
+const brushPreview = $('brush-preview');
+const zoomLabel = $('zoom-label');
+const sizeValue = $('size-value');
+const selectionBar = $('selection-bar');
+
+/* ===== 아틀라스 ===== */
+const atlas = {
+  canvas: document.createElement('canvas'),
+  ctx: null,
+  count: 0,
+  keys: new Map(),        // 타일 픽셀 키 -> 인덱스 (dedup)
+};
+atlas.canvas.width = ATLAS_COLS * TILE;
+atlas.canvas.height = TILE;
+atlas.ctx = atlas.canvas.getContext('2d', { willReadFrequently: true });
+
+function atlasPos(i) {
+  return { sx: (i % ATLAS_COLS) * TILE, sy: Math.floor(i / ATLAS_COLS) * TILE };
+}
+
+function atlasEnsure(count) {
+  const rows = Math.max(1, Math.ceil(count / ATLAS_COLS));
+  const needed = rows * TILE;
+  if (atlas.canvas.height >= needed) return;
+  const old = atlas.canvas;
+  const grown = document.createElement('canvas');
+  grown.width = old.width;
+  grown.height = Math.max(needed, old.height * 2);
+  const gctx = grown.getContext('2d', { willReadFrequently: true });
+  gctx.drawImage(old, 0, 0);
+  atlas.canvas = grown;
+  atlas.ctx = gctx;
+}
+
+function tileKey(data) {
+  let key = '';
+  for (let i = 0; i < data.length; i += 8) {
+    key += String.fromCharCode(
+      data[i], data[i + 1], data[i + 2], data[i + 3],
+      data[i + 4], data[i + 5], data[i + 6], data[i + 7]);
+  }
+  return key;
+}
+
+function atlasAdd(imageData) {
+  const d = imageData.data;
+  let empty = true;
+  for (let i = 3; i < d.length; i += 4) {
+    if (d[i] !== 0) { empty = false; break; }
+  }
+  if (empty) return -1;
+  const key = tileKey(d);
+  const found = atlas.keys.get(key);
+  if (found !== undefined) return found;
+  const idx = atlas.count++;
+  atlasEnsure(atlas.count);
+  const { sx, sy } = atlasPos(idx);
+  atlas.ctx.putImageData(imageData, sx, sy);
+  atlas.keys.set(key, idx);
+  return idx;
+}
+
+function drawTile(target, idx, dx, dy) {
+  if (idx < 0 || idx >= atlas.count) return;
+  const { sx, sy } = atlasPos(idx);
+  target.drawImage(atlas.canvas, sx, sy, TILE, TILE, dx, dy, TILE, TILE);
+}
+
+function rebuildAtlasKeys() {
+  atlas.keys.clear();
+  for (let i = 0; i < atlas.count; i++) {
+    const { sx, sy } = atlasPos(i);
+    atlas.keys.set(tileKey(atlas.ctx.getImageData(sx, sy, TILE, TILE).data), i);
+  }
+}
+
+/* ===== 이미지 분절 ===== */
+function sliceImage(img, name) {
+  let w = img.naturalWidth || img.width;
+  let h = img.naturalHeight || img.height;
+  const scaleDown = Math.min(1, 1024 / Math.max(w, h));
+  w = Math.max(TILE, Math.floor((w * scaleDown) / TILE) * TILE);
+  h = Math.max(TILE, Math.floor((h * scaleDown) / TILE) * TILE);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const cc = c.getContext('2d', { willReadFrequently: true });
+  cc.imageSmoothingEnabled = false;
+  cc.drawImage(img, 0, 0, w, h);
+  const gw = w / TILE, gh = h / TILE;
+  const cells = new Int32Array(gw * gh);
+  for (let ty = 0; ty < gh; ty++) {
+    for (let tx = 0; tx < gw; tx++) {
+      cells[ty * gw + tx] = atlasAdd(cc.getImageData(tx * TILE, ty * TILE, TILE, TILE));
+    }
+  }
+  state.source = { name, w: gw, h: gh, cells };
+  state.srcSel = null;
+  $('source-name').textContent = `${name} — ${gw}×${gh} 타일`;
+  $('btn-place').hidden = false;
+  $('source-panel').classList.remove('collapsed');
+  renderSourcePanel();
+  autosaveSoon();
+}
+
+/* ===== 문서 (레이어) ===== */
+function newDoc(w, h) {
+  state.gridW = w;
+  state.gridH = h;
+  state.bg = new Int32Array(w * h).fill(-1);
+  state.sprite = new Int32Array(w * h).fill(-1);
+  state.undoStack = [];
+  state.redoStack = [];
+  state.sel = null;
+  state.floating = null;
+  state.projectName = '무제';
+  state.projectId = null;
+}
+
+function activeCells() {
+  return state.activeLayer === 'bg' ? state.bg : state.sprite;
+}
+
+function inGrid(cx, cy) {
+  return cx >= 0 && cy >= 0 && cx < state.gridW && cy < state.gridH;
+}
+
+/* ===== undo/redo ===== */
+function snapshot() {
+  return {
+    bg: state.bg.slice(),
+    sprite: state.sprite.slice(),
+    gridW: state.gridW,
+    gridH: state.gridH,
+  };
+}
+function restore(s) {
+  state.bg = s.bg.slice();
+  state.sprite = s.sprite.slice();
+  state.gridW = s.gridW;
+  state.gridH = s.gridH;
+  state.sel = null;
+  state.floating = null;
+  updateSelectionBar();
+  updateSizeLabel();
+}
+function pushUndo() {
+  state.undoStack.push(snapshot());
+  if (state.undoStack.length > MAX_UNDO) state.undoStack.shift();
+  state.redoStack = [];
+}
+function undo() {
+  if (!state.undoStack.length) return;
+  discardFloating();
+  state.redoStack.push(snapshot());
+  restore(state.undoStack.pop());
+  renderAll();
+  autosaveSoon();
+}
+function redo() {
+  if (!state.redoStack.length) return;
+  discardFloating();
+  state.undoStack.push(snapshot());
+  restore(state.redoStack.pop());
+  renderAll();
+  autosaveSoon();
+}
+
+/* ===== 캔버스 크기 조절 (1타일 단위) ===== */
+function resizeGrid(newW, newH) {
+  newW = Math.min(MAX_GRID, Math.max(MIN_GRID, newW));
+  newH = Math.min(MAX_GRID, Math.max(MIN_GRID, newH));
+  if (newW === state.gridW && newH === state.gridH) return;
+  commitFloating();
+  pushUndo();
+  const remap = (src) => {
+    const out = new Int32Array(newW * newH).fill(-1);
+    const copyW = Math.min(state.gridW, newW);
+    const copyH = Math.min(state.gridH, newH);
+    for (let y = 0; y < copyH; y++) {
+      for (let x = 0; x < copyW; x++) out[y * newW + x] = src[y * state.gridW + x];
+    }
+    return out;
+  };
+  state.bg = remap(state.bg);
+  state.sprite = remap(state.sprite);
+  state.gridW = newW;
+  state.gridH = newH;
+  state.sel = null;
+  updateSelectionBar();
+  updateSizeLabel();
+  renderAll();
+  autosaveSoon();
+}
+
+function updateSizeLabel() {
+  sizeValue.textContent = `${state.gridW}×${state.gridH}`;
+}
+
+/* ===== 뷰 (줌/팬) ===== */
+function fitScale() {
+  const r = stage.getBoundingClientRect();
+  return Math.min(r.width / (state.gridW * TILE), r.height / (state.gridH * TILE)) * 0.92;
+}
+function viewScale() { return fitScale() * state.zoom; }  // 화면px / 문서px
+
+function fitView() {
+  const r = stage.getBoundingClientRect();
+  state.zoom = 1;
+  const v = viewScale();
+  state.panX = (r.width - state.gridW * TILE * v) / 2;
+  state.panY = (r.height - state.gridH * TILE * v) / 2;
+}
+
+function screenToCell(x, y) {
+  const cell = viewScale() * TILE;
+  return {
+    cx: Math.floor((x - state.panX) / cell),
+    cy: Math.floor((y - state.panY) / cell),
+  };
+}
+
+/* ===== 렌더링 ===== */
+const docCanvas = document.createElement('canvas');
+const docCtx = docCanvas.getContext('2d');
+
+let checkerPattern = null;
+function getCheckerPattern() {
+  if (checkerPattern) return checkerPattern;
+  const p = document.createElement('canvas');
+  p.width = TILE * 2; p.height = TILE * 2;
+  const pc = p.getContext('2d');
+  pc.fillStyle = '#3a3f58';
+  pc.fillRect(0, 0, TILE * 2, TILE * 2);
+  pc.fillStyle = '#454b6b';
+  pc.fillRect(0, 0, TILE, TILE);
+  pc.fillRect(TILE, TILE, TILE, TILE);
+  checkerPattern = ctx.createPattern(p, 'repeat');
+  return checkerPattern;
+}
+
+function renderDoc() {
+  docCanvas.width = state.gridW * TILE;
+  docCanvas.height = state.gridH * TILE;
+  docCtx.imageSmoothingEnabled = false;
+  const layers = [];
+  if (state.visible.bg) layers.push(state.bg);
+  if (state.visible.sprite) layers.push(state.sprite);
+  for (const cells of layers) {
+    for (let y = 0; y < state.gridH; y++) {
+      for (let x = 0; x < state.gridW; x++) {
+        drawTile(docCtx, cells[y * state.gridW + x], x * TILE, y * TILE);
+      }
+    }
+  }
+}
+
+function render() {
+  const r = stage.getBoundingClientRect();
+  ctx.clearRect(0, 0, r.width, r.height);
+  const v = viewScale();
+  const W = state.gridW * TILE, H = state.gridH * TILE;
+
+  ctx.save();
+  ctx.translate(state.panX, state.panY);
+  ctx.scale(v, v);
+  ctx.imageSmoothingEnabled = false;
+
+  // 문서 배경 체커 (투명 표시)
+  ctx.fillStyle = getCheckerPattern();
+  ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(docCanvas, 0, 0);
+
+  // 이동 중인 플로팅 선택
+  if (state.floating) {
+    const f = state.floating;
+    ctx.globalAlpha = 0.95;
+    ctx.drawImage(f.canvas, f.x * TILE, f.y * TILE);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#7aa2f7';
+    ctx.lineWidth = 2 / v;
+    ctx.setLineDash([6 / v, 4 / v]);
+    ctx.strokeRect(f.x * TILE, f.y * TILE, f.w * TILE, f.h * TILE);
+    ctx.setLineDash([]);
+  }
+
+  // 캔버스 선택 영역
+  if (state.sel) {
+    const s = state.sel;
+    ctx.strokeStyle = '#7aa2f7';
+    ctx.lineWidth = 2 / v;
+    ctx.setLineDash([6 / v, 4 / v]);
+    ctx.strokeRect(s.x * TILE, s.y * TILE, s.w * TILE, s.h * TILE);
+    ctx.setLineDash([]);
+  }
+
+  // 격자
+  const cell = v * TILE;
+  if (state.showGrid && cell >= 6) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.13)';
+    ctx.lineWidth = 1 / v;
+    ctx.beginPath();
+    for (let i = 0; i <= state.gridW; i++) {
+      ctx.moveTo(i * TILE, 0); ctx.lineTo(i * TILE, H);
+    }
+    for (let i = 0; i <= state.gridH; i++) {
+      ctx.moveTo(0, i * TILE); ctx.lineTo(W, i * TILE);
+    }
+    ctx.stroke();
+  }
+
+  // 외곽선
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1.5 / v;
+  ctx.strokeRect(0, 0, W, H);
+  ctx.restore();
+
+  zoomLabel.textContent = Math.round(state.zoom * 100) + '%';
+}
+
+function renderAll() {
+  renderDoc();
+  render();
+}
+
+function resizeCanvas() {
+  const r = stage.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = r.width * dpr;
+  canvas.height = r.height * dpr;
+  canvas.style.width = r.width + 'px';
+  canvas.style.height = r.height + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  checkerPattern = null;
+  render();
+}
+
+/* ===== 브러시 ===== */
+function setBrush(w, h, cells) {
+  state.brush = { w, h, cells: Int32Array.from(cells) };
+  renderBrushPreview();
+}
+
+function setSingleBrush(idx) {
+  if (idx < 0) return;
+  setBrush(1, 1, [idx]);
+}
+
+function renderBrushPreview() {
+  const pc = brushPreview.getContext('2d');
+  pc.clearRect(0, 0, brushPreview.width, brushPreview.height);
+  const b = state.brush;
+  if (!b) return;
+  const off = document.createElement('canvas');
+  off.width = b.w * TILE; off.height = b.h * TILE;
+  const oc = off.getContext('2d');
+  for (let y = 0; y < b.h; y++) {
+    for (let x = 0; x < b.w; x++) drawTile(oc, b.cells[y * b.w + x], x * TILE, y * TILE);
+  }
+  pc.imageSmoothingEnabled = false;
+  const s = Math.min(brushPreview.width / off.width, brushPreview.height / off.height, 4);
+  const dw = off.width * s, dh = off.height * s;
+  pc.drawImage(off, (brushPreview.width - dw) / 2, (brushPreview.height - dh) / 2, dw, dh);
+}
+
+function stampAt(cx, cy) {
+  const b = state.brush;
+  if (!b) return;
+  const cells = activeCells();
+  const ox = cx - Math.floor(b.w / 2);
+  const oy = cy - Math.floor(b.h / 2);
+  for (let y = 0; y < b.h; y++) {
+    for (let x = 0; x < b.w; x++) {
+      const t = b.cells[y * b.w + x];
+      if (t < 0) continue;
+      const gx = ox + x, gy = oy + y;
+      if (inGrid(gx, gy)) cells[gy * state.gridW + gx] = t;
+    }
+  }
+}
+
+function eraseAt(cx, cy) {
+  if (inGrid(cx, cy)) activeCells()[cy * state.gridW + cx] = -1;
+}
+
+function scatterAt(cx, cy) {
+  if (!atlas.count || !inGrid(cx, cy)) return;
+  activeCells()[cy * state.gridW + cx] = Math.floor(Math.random() * atlas.count);
+}
+
+function pickAt(cx, cy) {
+  if (!inGrid(cx, cy)) return;
+  const idx = activeCells()[cy * state.gridW + cx];
+  if (idx >= 0) setSingleBrush(idx);
+}
+
+function cellsOnLine(a, b) {
+  // 브레젠험 직선 (드래그 보간)
+  const out = [];
+  let x0 = a.cx, y0 = a.cy;
+  const x1 = b.cx, y1 = b.cy;
+  const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (;;) {
+    out.push([x0, y0]);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+  return out;
+}
+
+/* ===== 선택 (이동/삭제/브러시) ===== */
+function normRect(a, b) {
+  const x = Math.max(0, Math.min(a.cx, b.cx));
+  const y = Math.max(0, Math.min(a.cy, b.cy));
+  const x2 = Math.min(state.gridW - 1, Math.max(a.cx, b.cx));
+  const y2 = Math.min(state.gridH - 1, Math.max(a.cy, b.cy));
+  if (x2 < x || y2 < y) return null;
+  return { x, y, w: x2 - x + 1, h: y2 - y + 1 };
+}
+
+function rectCells(rect, layerCells) {
+  const out = new Int32Array(rect.w * rect.h);
+  for (let y = 0; y < rect.h; y++) {
+    for (let x = 0; x < rect.w; x++) {
+      out[y * rect.w + x] = layerCells[(rect.y + y) * state.gridW + (rect.x + x)];
+    }
+  }
+  return out;
+}
+
+function inRect(cx, cy, r) {
+  return r && cx >= r.x && cy >= r.y && cx < r.x + r.w && cy < r.y + r.h;
+}
+
+function liftSelection() {
+  // 선택 영역을 활성 레이어에서 들어 올려 플로팅으로 전환
+  const s = state.sel;
+  if (!s) return;
+  pushUndo();
+  const cells = activeCells();
+  const lifted = rectCells(s, cells);
+  for (let y = 0; y < s.h; y++) {
+    for (let x = 0; x < s.w; x++) cells[(s.y + y) * state.gridW + (s.x + x)] = -1;
+  }
+  const fc = document.createElement('canvas');
+  fc.width = s.w * TILE; fc.height = s.h * TILE;
+  const fctx = fc.getContext('2d');
+  for (let y = 0; y < s.h; y++) {
+    for (let x = 0; x < s.w; x++) drawTile(fctx, lifted[y * s.w + x], x * TILE, y * TILE);
+  }
+  state.floating = { x: s.x, y: s.y, w: s.w, h: s.h, cells: lifted, canvas: fc };
+  state.sel = null;
+  renderAll();
+}
+
+function commitFloating() {
+  const f = state.floating;
+  if (!f) return;
+  const cells = activeCells();
+  for (let y = 0; y < f.h; y++) {
+    for (let x = 0; x < f.w; x++) {
+      const t = f.cells[y * f.w + x];
+      if (t < 0) continue;
+      const gx = f.x + x, gy = f.y + y;
+      if (inGrid(gx, gy)) cells[gy * state.gridW + gx] = t;
+    }
+  }
+  state.floating = null;
+  updateSelectionBar();
+  renderAll();
+  autosaveSoon();
+}
+
+function discardFloating() {
+  state.floating = null;
+}
+
+function clearSelection() {
+  commitFloating();
+  state.sel = null;
+  updateSelectionBar();
+  render();
+}
+
+function updateSelectionBar() {
+  selectionBar.hidden = !(state.sel || state.floating);
+}
+
+$('sel-delete').addEventListener('click', () => {
+  if (state.floating) {
+    // 들어 올린 시점에 undo가 쌓여 있으므로 그대로 버리면 삭제가 된다
+    state.floating = null;
+  } else if (state.sel) {
+    pushUndo();
+    const s = state.sel;
+    const cells = activeCells();
+    for (let y = 0; y < s.h; y++) {
+      for (let x = 0; x < s.w; x++) cells[(s.y + y) * state.gridW + (s.x + x)] = -1;
+    }
+    state.sel = null;
+  }
+  updateSelectionBar();
+  renderAll();
+  autosaveSoon();
+});
+
+$('sel-brush').addEventListener('click', () => {
+  let picked = null;
+  if (state.floating) {
+    picked = { w: state.floating.w, h: state.floating.h, cells: state.floating.cells };
+    commitFloating();
+  } else if (state.sel) {
+    picked = { w: state.sel.w, h: state.sel.h, cells: rectCells(state.sel, activeCells()) };
+    state.sel = null;
+  }
+  if (picked) {
+    setBrush(picked.w, picked.h, picked.cells);
+    setTool('stamp');
+  }
+  updateSelectionBar();
+  render();
+});
+
+$('sel-done').addEventListener('click', clearSelection);
+
+/* ===== 행/열 시프트 (글리치) ===== */
+const shiftState = { active: false, start: null, axis: null, snap: null };
+
+function applyShift(cx, cy) {
+  const dx = cx - shiftState.start.cx;
+  const dy = cy - shiftState.start.cy;
+  if (!shiftState.axis) {
+    if (dx === 0 && dy === 0) return;
+    shiftState.axis = Math.abs(dx) >= Math.abs(dy) ? 'row' : 'col';
+  }
+  const cells = activeCells();
+  const { gridW: w, gridH: h } = state;
+  cells.set(shiftState.snap);
+  if (shiftState.axis === 'row') {
+    const y = shiftState.start.cy;
+    if (y < 0 || y >= h) return;
+    for (let x = 0; x < w; x++) {
+      cells[y * w + x] = shiftState.snap[y * w + (((x - dx) % w) + w) % w];
+    }
+  } else {
+    const x = shiftState.start.cx;
+    if (x < 0 || x >= w) return;
+    for (let y = 0; y < h; y++) {
+      cells[y * w + x] = shiftState.snap[((((y - dy) % h) + h) % h) * w + x];
+    }
+  }
+}
+
+/* ===== 포인터 입력 (터치/펜슬/마우스) ===== */
+const pointers = new Map();
+let drawing = false;
+let lastCell = null;
+let pinch = null;
+let undoPushed = false;
+let marqueeStart = null;
+let floatDrag = null;      // {startCx, startCy, origX, origY}
+
+canvas.addEventListener('pointerdown', (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+
+  if (pointers.size === 2 && e.pointerType === 'touch') {
+    cancelStroke();
+    const [p1, p2] = [...pointers.values()];
+    pinch = {
+      dist: Math.hypot(p1.x - p2.x, p1.y - p2.y),
+      cx: (p1.x + p2.x) / 2, cy: (p1.y + p2.y) / 2,
+      panX: state.panX, panY: state.panY, zoom: state.zoom,
+    };
+    return;
+  }
+  if (pointers.size > 1) return;
+
+  const { cx, cy } = screenToCell(e.offsetX, e.offsetY);
+  drawing = true;
+
+  switch (state.tool) {
+    case 'stamp':
+      pushUndo(); undoPushed = true;
+      stampAt(cx, cy);
+      lastCell = { cx, cy };
+      renderAll();
+      break;
+    case 'eraser':
+      pushUndo(); undoPushed = true;
+      eraseAt(cx, cy);
+      lastCell = { cx, cy };
+      renderAll();
+      break;
+    case 'scatter':
+      pushUndo(); undoPushed = true;
+      scatterAt(cx, cy);
+      lastCell = { cx, cy };
+      renderAll();
+      break;
+    case 'picker':
+      pickAt(cx, cy);
+      break;
+    case 'shift':
+      pushUndo(); undoPushed = true;
+      shiftState.active = true;
+      shiftState.start = { cx, cy };
+      shiftState.axis = null;
+      shiftState.snap = activeCells().slice();
+      break;
+    case 'select':
+      if (state.floating && inRect(cx, cy, state.floating)) {
+        floatDrag = { startCx: cx, startCy: cy, origX: state.floating.x, origY: state.floating.y };
+      } else if (state.sel && inRect(cx, cy, state.sel)) {
+        liftSelection();
+        floatDrag = { startCx: cx, startCy: cy, origX: state.floating.x, origY: state.floating.y };
+      } else {
+        commitFloating();
+        state.sel = null;
+        marqueeStart = { cx, cy };
+        updateSelectionBar();
+        render();
+      }
+      break;
+  }
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+
+  if (pinch && pointers.size === 2) {
+    const [p1, p2] = [...pointers.values()];
+    const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    const cx = (p1.x + p2.x) / 2, cy = (p1.y + p2.y) / 2;
+    state.zoom = Math.min(16, Math.max(0.2, pinch.zoom * (dist / pinch.dist)));
+    const applied = state.zoom / pinch.zoom;
+    state.panX = cx - (pinch.cx - pinch.panX) * applied;
+    state.panY = cy - (pinch.cy - pinch.panY) * applied;
+    render();
+    return;
+  }
+  if (!drawing) return;
+
+  const { cx, cy } = screenToCell(e.offsetX, e.offsetY);
+
+  switch (state.tool) {
+    case 'stamp':
+    case 'eraser':
+    case 'scatter': {
+      if (lastCell && cx === lastCell.cx && cy === lastCell.cy) return;
+      const fn = state.tool === 'stamp' ? stampAt : state.tool === 'eraser' ? eraseAt : scatterAt;
+      for (const [x, y] of cellsOnLine(lastCell || { cx, cy }, { cx, cy })) fn(x, y);
+      lastCell = { cx, cy };
+      renderAll();
+      break;
+    }
+    case 'shift':
+      if (shiftState.active) {
+        applyShift(cx, cy);
+        renderAll();
+      }
+      break;
+    case 'select':
+      if (floatDrag && state.floating) {
+        state.floating.x = floatDrag.origX + (cx - floatDrag.startCx);
+        state.floating.y = floatDrag.origY + (cy - floatDrag.startCy);
+        render();
+      } else if (marqueeStart) {
+        state.sel = normRect(marqueeStart, { cx, cy });
+        render();
+      }
+      break;
+  }
+});
+
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+  if (!drawing || pointers.size > 0) return;
+
+  if (state.tool === 'shift' && shiftState.active && !shiftState.axis && undoPushed) {
+    state.undoStack.pop();   // 움직임 없던 시프트는 undo 항목 제거
+    undoPushed = false;
+  }
+  shiftState.active = false;
+  shiftState.snap = null;
+
+  if (state.tool === 'select') {
+    if (marqueeStart && !state.sel) {
+      // 드래그 없이 탭: 1칸 선택
+      state.sel = normRect(marqueeStart, marqueeStart);
+    }
+    marqueeStart = null;
+    floatDrag = null;
+    updateSelectionBar();
+  }
+
+  drawing = false;
+  lastCell = null;
+  undoPushed = false;
+  render();
+  autosaveSoon();
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+
+function cancelStroke() {
+  if (!drawing) return;
+  if (undoPushed) {
+    // 한 손가락으로 긋다가 두 손가락 제스처로 전환: 방금 획을 되돌림
+    restore(state.undoStack.pop());
+    undoPushed = false;
+  }
+  shiftState.active = false;
+  shiftState.snap = null;
+  marqueeStart = null;
+  floatDrag = null;
+  drawing = false;
+  lastCell = null;
+  renderAll();
+}
+
+/* ===== 소스 패널 ===== */
+let srcCellPx = 16;
+let srcDrag = null;
+
+function renderSourcePanel() {
+  const src = state.source;
+  const body = $('source-body');
+  if (!src) {
+    sourceCanvas.width = sourceCanvas.height = 0;
+    return;
+  }
+  const availW = Math.max(120, body.clientWidth - 20);
+  const availH = 170;
+  srcCellPx = Math.max(3, Math.min(28,
+    Math.floor(availW / src.w), Math.floor(availH / src.h)));
+  sourceCanvas.width = src.w * TILE;
+  sourceCanvas.height = src.h * TILE;
+  sourceCanvas.style.width = src.w * srcCellPx + 'px';
+  sourceCanvas.style.height = src.h * srcCellPx + 'px';
+  sourceCtx.imageSmoothingEnabled = false;
+  sourceCtx.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+  for (let y = 0; y < src.h; y++) {
+    for (let x = 0; x < src.w; x++) {
+      drawTile(sourceCtx, src.cells[y * src.w + x], x * TILE, y * TILE);
+    }
+  }
+  if (state.srcSel) {
+    const s = state.srcSel;
+    sourceCtx.strokeStyle = '#7aa2f7';
+    sourceCtx.lineWidth = 1.5;
+    sourceCtx.strokeRect(s.x * TILE + 0.75, s.y * TILE + 0.75, s.w * TILE - 1.5, s.h * TILE - 1.5);
+  }
+}
+
+function srcCellFromEvent(e) {
+  const src = state.source;
+  return {
+    cx: Math.min(src.w - 1, Math.max(0, Math.floor(e.offsetX / srcCellPx))),
+    cy: Math.min(src.h - 1, Math.max(0, Math.floor(e.offsetY / srcCellPx))),
+  };
+}
+
+sourceCanvas.addEventListener('pointerdown', (e) => {
+  if (!state.source) return;
+  sourceCanvas.setPointerCapture(e.pointerId);
+  const c = srcCellFromEvent(e);
+  srcDrag = { start: c, moved: false };
+  state.srcSel = { x: c.cx, y: c.cy, w: 1, h: 1 };
+  renderSourcePanel();
+});
+sourceCanvas.addEventListener('pointermove', (e) => {
+  if (!srcDrag || !state.source) return;
+  const c = srcCellFromEvent(e);
+  if (c.cx !== srcDrag.start.cx || c.cy !== srcDrag.start.cy) srcDrag.moved = true;
+  const x = Math.min(srcDrag.start.cx, c.cx);
+  const y = Math.min(srcDrag.start.cy, c.cy);
+  state.srcSel = {
+    x, y,
+    w: Math.abs(c.cx - srcDrag.start.cx) + 1,
+    h: Math.abs(c.cy - srcDrag.start.cy) + 1,
+  };
+  renderSourcePanel();
+});
+function srcPointerEnd() {
+  if (!srcDrag || !state.source) { srcDrag = null; return; }
+  const s = state.srcSel;
+  const src = state.source;
+  const cells = new Int32Array(s.w * s.h);
+  for (let y = 0; y < s.h; y++) {
+    for (let x = 0; x < s.w; x++) {
+      cells[y * s.w + x] = src.cells[(s.y + y) * src.w + (s.x + x)];
+    }
+  }
+  setBrush(s.w, s.h, cells);
+  setTool('stamp');
+  srcDrag = null;
+}
+sourceCanvas.addEventListener('pointerup', srcPointerEnd);
+sourceCanvas.addEventListener('pointercancel', srcPointerEnd);
+
+$('btn-source-toggle').addEventListener('click', (e) => {
+  const panel = $('source-panel');
+  panel.classList.toggle('collapsed');
+  e.currentTarget.textContent = panel.classList.contains('collapsed') ? '▴' : '▾';
+  if (!panel.classList.contains('collapsed')) renderSourcePanel();
+});
+
+$('btn-place').addEventListener('click', () => {
+  // 소스 전체를 활성 레이어 (0,0)에 배치
+  const src = state.source;
+  if (!src) return;
+  commitFloating();
+  pushUndo();
+  const cells = activeCells();
+  for (let y = 0; y < Math.min(src.h, state.gridH); y++) {
+    for (let x = 0; x < Math.min(src.w, state.gridW); x++) {
+      const t = src.cells[y * src.w + x];
+      if (t >= 0) cells[y * state.gridW + x] = t;
+    }
+  }
+  renderAll();
+  autosaveSoon();
+});
+
+/* ===== 에셋 브라우저 ===== */
+async function loadAssetIndex() {
+  const wrap = $('asset-list');
+  try {
+    const res = await fetch('assets/index.json', { cache: 'no-cache' });
+    const index = await res.json();
+    wrap.innerHTML = '';
+    for (const [folder, files] of Object.entries(index)) {
+      const sec = document.createElement('div');
+      sec.className = 'asset-folder';
+      const h = document.createElement('h4');
+      h.textContent = '📁 ' + folder;
+      const grid = document.createElement('div');
+      grid.className = 'asset-grid';
+      for (const file of files) {
+        const url = `assets/${folder}/${file}`;
+        const item = document.createElement('button');
+        item.className = 'asset-item';
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = file;
+        const label = document.createElement('span');
+        label.textContent = file.replace(/\.[^.]+$/, '');
+        item.append(img, label);
+        item.addEventListener('click', () => {
+          const loader = new Image();
+          loader.onload = () => {
+            sliceImage(loader, `${folder}/${label.textContent}`);
+            closeDrawers();
+          };
+          loader.src = url;
+          wrap.querySelectorAll('.asset-item').forEach(el => el.classList.remove('active'));
+          item.classList.add('active');
+        });
+        grid.appendChild(item);
+      }
+      sec.append(h, grid);
+      wrap.appendChild(sec);
+    }
+    if (!Object.keys(index).length) wrap.textContent = '에셋이 없습니다.';
+  } catch (_) {
+    wrap.textContent = '에셋 목록을 불러오지 못했습니다.';
+  }
+}
+
+$('file-input').addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    sliceImage(img, file.name.replace(/\.[^.]+$/, ''));
+    URL.revokeObjectURL(url);
+    closeDrawers();
+  };
+  img.src = url;
+  e.target.value = '';
+});
+
+/* ===== 도구/레이어/크기 UI ===== */
+function setTool(tool) {
+  state.tool = tool;
+  document.querySelectorAll('.tool-mode').forEach(b =>
+    b.classList.toggle('active', b.dataset.tool === tool));
+  if (tool !== 'select') clearSelection();
+}
+document.querySelectorAll('.tool-mode').forEach(btn => {
+  btn.addEventListener('click', () => setTool(btn.dataset.tool));
+});
+
+function setLayer(layer) {
+  clearSelection();
+  state.activeLayer = layer;
+  $('layer-bg').classList.toggle('active', layer === 'bg');
+  $('layer-sprite').classList.toggle('active', layer === 'sprite');
+}
+$('layer-bg').addEventListener('click', () => setLayer('bg'));
+$('layer-sprite').addEventListener('click', () => setLayer('sprite'));
+
+function toggleVis(layer, btn) {
+  state.visible[layer] = !state.visible[layer];
+  btn.classList.toggle('off', !state.visible[layer]);
+  renderAll();
+}
+$('vis-bg').addEventListener('click', (e) => toggleVis('bg', e.currentTarget));
+$('vis-sprite').addEventListener('click', (e) => toggleVis('sprite', e.currentTarget));
+
+$('w-minus').addEventListener('click', () => resizeGrid(state.gridW - 1, state.gridH));
+$('w-plus').addEventListener('click', () => resizeGrid(state.gridW + 1, state.gridH));
+$('h-minus').addEventListener('click', () => resizeGrid(state.gridW, state.gridH - 1));
+$('h-plus').addEventListener('click', () => resizeGrid(state.gridW, state.gridH + 1));
+
+$('btn-grid').addEventListener('click', (e) => {
+  state.showGrid = !state.showGrid;
+  e.currentTarget.classList.toggle('active', state.showGrid);
+  render();
+});
+$('btn-undo').addEventListener('click', undo);
+$('btn-redo').addEventListener('click', redo);
+
+/* ===== PNG 내보내기 ===== */
+$('btn-export').addEventListener('click', () => {
+  commitFloating();
+  renderDoc();
+  const SCALE = 4;
+  const out = document.createElement('canvas');
+  out.width = docCanvas.width * SCALE;
+  out.height = docCanvas.height * SCALE;
+  const octx = out.getContext('2d');
+  octx.imageSmoothingEnabled = false;
+  octx.drawImage(docCanvas, 0, 0, out.width, out.height);
+  const a = document.createElement('a');
+  a.href = out.toDataURL('image/png');
+  a.download = (state.projectName || 'glitch-tile') + '.png';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
+
+/* ===== 저장 (IndexedDB) ===== */
+const DB_NAME = 'glitch-tile-editor';
+let dbPromise = null;
+function openDB() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      db.createObjectStore('projects', { keyPath: 'id', autoIncrement: true });
+      db.createObjectStore('kv', { keyPath: 'key' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return dbPromise;
+}
+function dbReq(storeName, mode, fn) {
+  return openDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, mode);
+    const req = fn(tx.objectStore(storeName));
+    tx.oncomplete = () => resolve(req && req.result);
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+
+function serializeDoc() {
+  renderDoc();
+  return {
+    version: 1,
+    gridW: state.gridW,
+    gridH: state.gridH,
+    bg: Array.from(state.bg),
+    sprite: Array.from(state.sprite),
+    atlas: atlas.canvas.toDataURL('image/png'),
+    atlasCount: atlas.count,
+    name: state.projectName,
+    thumb: docCanvas.toDataURL('image/png'),
+    updated: Date.now(),
+  };
+}
+
+function loadDoc(doc) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      atlas.canvas.width = img.width;
+      atlas.canvas.height = img.height;
+      atlas.ctx = atlas.canvas.getContext('2d', { willReadFrequently: true });
+      atlas.ctx.imageSmoothingEnabled = false;
+      atlas.ctx.drawImage(img, 0, 0);
+      atlas.count = doc.atlasCount;
+      rebuildAtlasKeys();
+      state.gridW = doc.gridW;
+      state.gridH = doc.gridH;
+      state.bg = Int32Array.from(doc.bg);
+      state.sprite = Int32Array.from(doc.sprite);
+      state.projectName = doc.name || '무제';
+      state.undoStack = [];
+      state.redoStack = [];
+      state.sel = null;
+      state.floating = null;
+      state.brush = null;
+      state.source = null;
+      state.srcSel = null;
+      $('source-name').textContent = '에셋을 선택하세요';
+      $('btn-place').hidden = true;
+      renderSourcePanel();
+      renderBrushPreview();
+      updateSelectionBar();
+      updateSizeLabel();
+      fitView();
+      renderAll();
+      resolve();
+    };
+    img.onerror = () => resolve();
+    img.src = doc.atlas;
+  });
+}
+
+let autosaveTimer = null;
+function autosaveSoon() {
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => {
+    try {
+      dbReq('kv', 'readwrite', s => s.put({ key: 'current', doc: serializeDoc() })).catch(() => {});
+    } catch (_) { /* 무시 */ }
+  }, 500);
+}
+
+async function restoreAutosave() {
+  try {
+    const row = await dbReq('kv', 'readonly', s => s.get('current'));
+    if (row && row.doc) {
+      await loadDoc(row.doc);
+      return true;
+    }
+  } catch (_) { /* 무시 */ }
+  return false;
+}
+
+async function saveProject(name) {
+  const doc = serializeDoc();
+  doc.name = name;
+  if (state.projectId != null) doc.id = state.projectId;
+  const id = await dbReq('projects', 'readwrite', s => s.put(doc));
+  state.projectId = id;
+  state.projectName = name;
+  autosaveSoon();
+  refreshSavedList();
+}
+
+async function refreshSavedList() {
+  const list = $('saved-list');
+  list.innerHTML = '';
+  let projects = [];
+  try {
+    projects = (await dbReq('projects', 'readonly', s => s.getAll())) || [];
+  } catch (_) { /* 무시 */ }
+  projects.sort((a, b) => b.updated - a.updated);
+  for (const p of projects) {
+    const li = document.createElement('li');
+    const thumb = document.createElement('img');
+    thumb.src = p.thumb;
+    thumb.width = 56; thumb.height = 42;
+    thumb.style.objectFit = 'contain';
+    thumb.style.imageRendering = 'pixelated';
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = `${p.name} (${p.gridW}×${p.gridH})`;
+
+    const loadBtn = document.createElement('button');
+    loadBtn.textContent = '열기';
+    loadBtn.addEventListener('click', async () => {
+      await loadDoc(p);
+      state.projectId = p.id;
+      closeDrawers();
+      autosaveSoon();
+    });
+
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '🗑';
+    delBtn.addEventListener('click', async () => {
+      await dbReq('projects', 'readwrite', s => s.delete(p.id));
+      if (state.projectId === p.id) state.projectId = null;
+      refreshSavedList();
+    });
+
+    li.append(thumb, name, loadBtn, delBtn);
+    list.appendChild(li);
+  }
+  if (!projects.length) {
+    const li = document.createElement('li');
+    li.textContent = '저장된 작업이 없습니다.';
+    li.style.opacity = '0.6';
+    li.style.fontSize = '13px';
+    list.appendChild(li);
+  }
+}
+
+/* ===== 서랍 UI ===== */
+function closeDrawers() {
+  document.querySelectorAll('.drawer').forEach(d => d.classList.add('hidden'));
+}
+$('btn-menu').addEventListener('click', () => {
+  $('project-drawer').classList.remove('hidden');
+  $('save-name').value = state.projectName;
+  refreshSavedList();
+});
+$('btn-assets').addEventListener('click', () => {
+  $('asset-drawer').classList.remove('hidden');
+});
+document.querySelectorAll('.btn-close-drawer').forEach(b =>
+  b.addEventListener('click', closeDrawers));
+document.querySelectorAll('.drawer').forEach(d =>
+  d.addEventListener('click', (e) => { if (e.target === d) closeDrawers(); }));
+
+$('btn-new').addEventListener('click', () => {
+  newDoc(32, 24);
+  updateSizeLabel();
+  fitView();
+  renderAll();
+  closeDrawers();
+  autosaveSoon();
+});
+$('btn-save').addEventListener('click', () => {
+  const name = $('save-name').value.trim() || '무제';
+  saveProject(name);
+});
+
+/* ===== 온라인/오프라인 표시 ===== */
+function updateOnline() { $('offline-badge').hidden = navigator.onLine; }
+window.addEventListener('online', updateOnline);
+window.addEventListener('offline', updateOnline);
+
+/* ===== 초기화 ===== */
+window.addEventListener('resize', () => {
+  resizeCanvas();
+  renderSourcePanel();
+});
+window.addEventListener('contextmenu', (e) => e.preventDefault());
+
+async function init() {
+  newDoc(32, 24);
+  updateSizeLabel();
+  updateOnline();
+  loadAssetIndex();
+  const restored = await restoreAutosave();
+  if (!restored) {
+    fitView();
+    resizeCanvas();
+    renderAll();
+  } else {
+    resizeCanvas();
+  }
+}
+init();
+
+/* ===== 테스트/디버그 훅 ===== */
+window.__state = () => state;
+window.__countFilled = (layer) => {
+  const cells = layer === 'bg' ? state.bg : state.sprite;
+  let n = 0;
+  for (let i = 0; i < cells.length; i++) if (cells[i] >= 0) n++;
+  return n;
+};
+window.__layerHash = (layer) => {
+  const cells = layer === 'bg' ? state.bg : state.sprite;
+  let h = 0;
+  for (let i = 0; i < cells.length; i++) h = (h * 31 + cells[i] + 2) | 0;
+  return h;
+};
+window.__cellCenter = (cx, cy) => {
+  const cell = viewScale() * TILE;
+  return { x: state.panX + (cx + 0.5) * cell, y: state.panY + (cy + 0.5) * cell };
+};
+
+/* ===== 서비스 워커 등록 (오프라인 지원) ===== */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
