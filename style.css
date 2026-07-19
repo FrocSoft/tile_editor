@@ -137,6 +137,71 @@ button.tool:active { opacity: 0.7; }
   padding: 0 8px;
 }
 
+/* NES 팔레트 패널 */
+#palette-panel {
+  flex-shrink: 0;
+  background: var(--panel);
+  border-top: 1px solid #16161e;
+}
+#palette-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  flex-wrap: wrap;
+}
+#pal-set-label { font-size: 13px; font-weight: 700; opacity: 0.85; }
+#palette-body {
+  padding: 0 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 34vh;
+  overflow-y: auto;
+  touch-action: pan-y;
+}
+.pal-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pal-label { font-size: 12px; opacity: 0.65; }
+#pal-tabs { display: flex; gap: 6px; }
+.pal-tab {
+  width: 44px;
+  height: 30px;
+  border: 2px solid transparent;
+  border-radius: 8px;
+}
+.pal-tab.active { border-color: #fff; }
+#pal-slots { display: flex; gap: 6px; }
+.pal-slot {
+  width: 40px;
+  height: 40px;
+  border: 2px solid #16161e;
+  border-radius: 8px;
+  background:
+    repeating-conic-gradient(#16161e 0% 25%, #2f3450 0% 50%) 0 0 / 10px 10px;
+}
+.pal-slot.selected { border-color: #fff; transform: scale(1.1); }
+#master-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+.master-swatch {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(0,0,0,0.4);
+  border-radius: 6px;
+}
+.master-swatch:active { transform: scale(1.15); }
+.chip.alt { background: var(--panel2); color: var(--fg); }
+.chip.active { background: #9ece6a; color: #1a1b26; }
+.file-label2 {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 18px;
+  background: var(--panel2);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 /* 소스 패널 */
 #source-panel {
   flex-shrink: 0;

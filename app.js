@@ -33,6 +33,7 @@ const state = {
   redoStack: [],
   projectName: '무제',
   projectId: null,
+  nes: null,               // NES 팔레트 상태 (init에서 defaultNesState로 채움)
 };
 
 /* ===== DOM ===== */
@@ -155,61 +156,97 @@ function transformBrush(op) {
   renderBrushPreview();
 }
 
-/* ===== 레트로 팔레트 리컬러 ===== */
-const PALETTES = {
-  nes: [
-    '#666666', '#002A88', '#1412A7', '#3B00A4', '#5C007E', '#6E0040', '#6C0600', '#561D00',
-    '#333500', '#0B4800', '#005200', '#004F08', '#00404D', '#000000',
-    '#ADADAD', '#155FD9', '#4240FF', '#7527FE', '#A01ACC', '#B71E7B', '#B53120', '#994E00',
-    '#6B6D00', '#388700', '#0C9300', '#008F32', '#007C8D',
-    '#FFFEFF', '#64B0FF', '#9290FF', '#C676FF', '#F36AFF', '#FE6ECC', '#FE8170', '#EA9E22',
-    '#BCBE00', '#88D800', '#5CE430', '#45E082', '#48CDDE', '#4F4F4F',
-    '#C0DFFF', '#D3D2FF', '#E8C8FF', '#FBC2FF', '#FEC4EA', '#FECCC5', '#F7D8A5',
-    '#E4E594', '#CFEF96', '#BDF4AB', '#B3F3CC', '#B5EBF2', '#B8B8B8',
-  ],
-  gameboy: ['#0F380F', '#306230', '#8BAC0F', '#9BBC0F'],
-  gray4: ['#000000', '#555555', '#AAAAAA', '#FFFFFF'],
-};
-// hex -> [r,g,b] 미리 계산
-const paletteRGB = {};
-for (const [name, list] of Object.entries(PALETTES)) {
-  paletteRGB[name] = list.map(hex => [
+/* ===== NES PPU 방식 팔레트 시스템 =====
+ * - 마스터 팔레트(기본: NES 2C02 54색, 파일로 교체 가능)에서만 색을 고른다
+ * - 공용 배경색 1 + BG 서브팔레트 4개 + SPR 서브팔레트 4개, 각 3색
+ * - 타일 하나를 서브팔레트로 양자화하면 최대 4색(NES 규칙)이 된다
+ */
+const NES_MASTER = [
+  '#666666', '#002A88', '#1412A7', '#3B00A4', '#5C007E', '#6E0040', '#6C0600', '#561D00',
+  '#333500', '#0B4800', '#005200', '#004F08', '#00404D', '#000000',
+  '#ADADAD', '#155FD9', '#4240FF', '#7527FE', '#A01ACC', '#B71E7B', '#B53120', '#994E00',
+  '#6B6D00', '#388700', '#0C9300', '#008F32', '#007C8D',
+  '#FFFEFF', '#64B0FF', '#9290FF', '#C676FF', '#F36AFF', '#FE6ECC', '#FE8170', '#EA9E22',
+  '#BCBE00', '#88D800', '#5CE430', '#45E082', '#48CDDE', '#4F4F4F',
+  '#C0DFFF', '#D3D2FF', '#E8C8FF', '#FBC2FF', '#FEC4EA', '#FECCC5', '#F7D8A5',
+  '#E4E594', '#CFEF96', '#BDF4AB', '#B3F3CC', '#B5EBF2', '#B8B8B8',
+];
+let masterPalette = NES_MASTER.slice();
+
+function hexToRGB(hex) {
+  return [
     parseInt(hex.slice(1, 3), 16),
     parseInt(hex.slice(3, 5), 16),
     parseInt(hex.slice(5, 7), 16),
-  ]);
+  ];
+}
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map(n => n.toString(16).padStart(2, '0').toUpperCase()).join('');
 }
 
-const nearestCache = new Map();   // "pal:rgb" -> [r,g,b]
-function nearestColor(r, g, b, pal) {
-  const key = pal + ':' + ((r << 16) | (g << 8) | b);
-  const hit = nearestCache.get(key);
-  if (hit) return hit;
-  let best = null, bestDist = Infinity;
-  for (const [pr, pg, pb] of paletteRGB[pal]) {
-    const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
-    if (d < bestDist) { bestDist = d; best = [pr, pg, pb]; }
+function defaultNesState() {
+  const presets = [
+    ['#B53120', '#EA9E22', '#F7D8A5'],   // 갈색·주황조
+    ['#0B4800', '#388700', '#88D800'],   // 초록조
+    ['#1412A7', '#4240FF', '#64B0FF'],   // 파랑조
+    ['#4F4F4F', '#ADADAD', '#FFFEFF'],   // 회색조
+  ];
+  return {
+    backdrop: '#000000',
+    bgPals: presets.map(p => p.slice()),
+    sprPals: presets.map(p => p.slice()),
+    activePal: 0,
+  };
+}
+
+function nearestInList(r, g, b, rgbList) {
+  let best = rgbList[0], bestDist = Infinity;
+  for (const c of rgbList) {
+    const d = (r - c[0]) ** 2 + (g - c[1]) ** 2 + (b - c[2]) ** 2;
+    if (d < bestDist) { bestDist = d; best = c; }
   }
-  nearestCache.set(key, best);
   return best;
 }
 
-const tileRecolorCache = new Map();   // "idx:pal" -> 리컬러된 타일 인덱스
-function recolorTile(idx, pal) {
+const tileQuantCache = new Map();   // "idx|색목록" -> 양자화된 타일 인덱스
+function quantizeTile(idx, hexColors) {
   if (idx < 0) return -1;
-  const key = `${idx}:${pal}`;
-  const cached = tileRecolorCache.get(key);
+  const key = idx + '|' + hexColors.join(',');
+  const cached = tileQuantCache.get(key);
   if (cached !== undefined) return cached;
+  const rgbList = hexColors.map(hexToRGB);
   const { sx, sy } = atlasPos(idx);
   const img = atlas.ctx.getImageData(sx, sy, TILE, TILE);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
     if (d[i + 3] === 0) continue;
-    const [r, g, b] = nearestColor(d[i], d[i + 1], d[i + 2], pal);
+    const [r, g, b] = nearestInList(d[i], d[i + 1], d[i + 2], rgbList);
     d[i] = r; d[i + 1] = g; d[i + 2] = b;
   }
   const result = atlasAdd(img);
-  tileRecolorCache.set(key, result);
+  tileQuantCache.set(key, result);
+  return result;
+}
+
+const tileSwapCache = new Map();   // "idx|from|to" -> 색 대치된 타일 인덱스
+function swapTileColor(idx, fromRGB, toRGB) {
+  if (idx < 0) return -1;
+  const key = idx + '|' + fromRGB.join(',') + '|' + toRGB.join(',');
+  const cached = tileSwapCache.get(key);
+  if (cached !== undefined) return cached;
+  const { sx, sy } = atlasPos(idx);
+  const img = atlas.ctx.getImageData(sx, sy, TILE, TILE);
+  const d = img.data;
+  let touched = false;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue;
+    if (d[i] === fromRGB[0] && d[i + 1] === fromRGB[1] && d[i + 2] === fromRGB[2]) {
+      d[i] = toRGB[0]; d[i + 1] = toRGB[1]; d[i + 2] = toRGB[2];
+      touched = true;
+    }
+  }
+  const result = touched ? atlasAdd(img) : idx;
+  tileSwapCache.set(key, result);
   return result;
 }
 
@@ -683,6 +720,8 @@ function clearSelection() {
 
 function updateSelectionBar() {
   selectionBar.hidden = !(state.sel || state.floating);
+  const palApply = $('pal-apply');
+  if (palApply) palApply.textContent = state.sel ? '선택 영역에 적용' : '전체에 적용';
 }
 
 $('sel-delete').addEventListener('click', () => {
@@ -728,31 +767,237 @@ $('sel-dup').addEventListener('click', () => {
   updateSelectionBar();
 });
 
-$('sel-recolor').addEventListener('click', () => {
-  const pal = $('sel-palette').value;
-  if (state.floating) {
-    // 플로팅 자체를 리컬러 (아직 확정 전이므로 undo는 lift 시점 것을 공유)
-    const f = state.floating;
-    for (let i = 0; i < f.cells.length; i++) f.cells[i] = recolorTile(f.cells[i], pal);
-    f.canvas = buildFloatCanvas(f.cells, f.w, f.h);
-  } else if (state.sel) {
-    pushUndo();
-    const s = state.sel;
-    const cells = activeCells();
-    for (let y = 0; y < s.h; y++) {
-      for (let x = 0; x < s.w; x++) {
-        const i = (s.y + y) * state.gridW + (s.x + x);
-        cells[i] = recolorTile(cells[i], pal);
+$('brush-rot').addEventListener('click', () => transformBrush('rot90'));
+$('brush-fliph').addEventListener('click', () => transformBrush('flipH'));
+$('brush-flipv').addEventListener('click', () => transformBrush('flipV'));
+
+/* ===== NES 팔레트 패널 ===== */
+const palettePanel = $('palette-panel');
+let palSelectedSlot = null;   // null | 'backdrop' | 0 | 1 | 2
+let swapMode = false;
+let swapFrom = null;          // [r,g,b] | null
+let swapTo = null;            // hex | null
+
+function currentPalSet() {
+  return state.activeLayer === 'bg' ? state.nes.bgPals : state.nes.sprPals;
+}
+function currentSubpal() {
+  return currentPalSet()[state.nes.activePal];
+}
+
+function paletteScopeRect() {
+  return state.sel || { x: 0, y: 0, w: state.gridW, h: state.gridH };
+}
+
+function renderPaletteUI() {
+  if (!state.nes) return;
+  $('pal-set-label').textContent = state.activeLayer === 'bg' ? 'BG 팔레트' : 'SPR 팔레트';
+  $('pal-apply').textContent = state.sel ? '선택 영역에 적용' : '전체에 적용';
+
+  // 서브팔레트 탭 (P0~P3, 3색 미리보기 줄무늬)
+  const tabs = $('pal-tabs');
+  tabs.innerHTML = '';
+  currentPalSet().forEach((pal, i) => {
+    const b = document.createElement('button');
+    b.className = 'pal-tab' + (i === state.nes.activePal ? ' active' : '');
+    b.style.background = `linear-gradient(90deg, ${pal[0]} 33%, ${pal[1]} 33% 66%, ${pal[2]} 66%)`;
+    b.title = `서브팔레트 ${i}`;
+    b.addEventListener('click', () => {
+      state.nes.activePal = i;
+      palSelectedSlot = null;
+      renderPaletteUI();
+    });
+    tabs.appendChild(b);
+  });
+
+  // 배경색 + 슬롯 3개
+  const backdrop = $('pal-backdrop');
+  backdrop.style.background = state.nes.backdrop;
+  backdrop.classList.toggle('selected', palSelectedSlot === 'backdrop');
+  const slots = $('pal-slots');
+  slots.innerHTML = '';
+  currentSubpal().forEach((hex, i) => {
+    const b = document.createElement('button');
+    b.className = 'pal-slot' + (palSelectedSlot === i ? ' selected' : '');
+    b.style.background = hex;
+    b.addEventListener('click', () => {
+      palSelectedSlot = palSelectedSlot === i ? null : i;
+      renderPaletteUI();
+    });
+    slots.appendChild(b);
+  });
+  $('pal-hint').textContent = palSelectedSlot !== null
+    ? '아래 마스터 팔레트에서 색을 고르세요'
+    : '슬롯을 탭한 뒤 아래에서 색을 고르세요';
+
+  // 색 대치 행
+  $('pal-swap-row').hidden = !swapMode;
+  $('pal-swap-toggle').classList.toggle('active', swapMode);
+  $('swap-from').style.background = swapFrom ? rgbToHex(...swapFrom) : 'transparent';
+  $('swap-to').style.background = swapTo || 'transparent';
+  $('swap-hint').textContent = !swapFrom
+    ? '캔버스를 탭해 원본 색을 집으세요'
+    : (!swapTo ? '아래에서 바꿀 색을 고르세요' : '대치 실행을 누르세요');
+
+  renderMasterGrid();
+}
+
+function renderMasterGrid() {
+  const grid = $('master-grid');
+  grid.innerHTML = '';
+  for (const hex of masterPalette) {
+    const b = document.createElement('button');
+    b.className = 'master-swatch';
+    b.style.background = hex;
+    b.title = hex;
+    b.addEventListener('click', () => {
+      if (swapMode) {
+        swapTo = hex;
+      } else if (palSelectedSlot === 'backdrop') {
+        state.nes.backdrop = hex;
+        autosaveSoon();
+      } else if (palSelectedSlot !== null) {
+        currentSubpal()[palSelectedSlot] = hex;
+        autosaveSoon();
       }
+      renderPaletteUI();
+    });
+    grid.appendChild(b);
+  }
+}
+
+// 서브팔레트 양자화: 범위 내 활성 레이어 타일을 [배경색(BG만)+3색]으로
+$('pal-apply').addEventListener('click', () => {
+  commitFloating();
+  const colors = state.activeLayer === 'bg'
+    ? [state.nes.backdrop, ...currentSubpal()]
+    : currentSubpal().slice();
+  pushUndo();
+  const r = paletteScopeRect();
+  const cells = activeCells();
+  for (let y = 0; y < r.h; y++) {
+    for (let x = 0; x < r.w; x++) {
+      const i = (r.y + y) * state.gridW + (r.x + x);
+      cells[i] = quantizeTile(cells[i], colors);
     }
   }
   renderAll();
   autosaveSoon();
 });
 
-$('brush-rot').addEventListener('click', () => transformBrush('rot90'));
-$('brush-fliph').addEventListener('click', () => transformBrush('flipH'));
-$('brush-flipv').addEventListener('click', () => transformBrush('flipV'));
+// 색 대치: 원본 색(캔버스에서 집은 색)을 대상 색으로, 양쪽 레이어 모두
+$('swap-exec').addEventListener('click', () => {
+  if (!swapFrom || !swapTo) return;
+  commitFloating();
+  pushUndo();
+  const toRGB = hexToRGB(swapTo);
+  const r = paletteScopeRect();
+  for (const cells of [state.bg, state.sprite]) {
+    for (let y = 0; y < r.h; y++) {
+      for (let x = 0; x < r.w; x++) {
+        const i = (r.y + y) * state.gridW + (r.x + x);
+        cells[i] = swapTileColor(cells[i], swapFrom, toRGB);
+      }
+    }
+  }
+  swapFrom = null;
+  swapTo = null;
+  renderPaletteUI();
+  renderAll();
+  autosaveSoon();
+});
+
+$('pal-swap-toggle').addEventListener('click', () => {
+  swapMode = !swapMode;
+  if (!swapMode) { swapFrom = null; swapTo = null; }
+  renderPaletteUI();
+});
+
+$('btn-palette').addEventListener('click', (e) => {
+  palettePanel.hidden = !palettePanel.hidden;
+  e.currentTarget.classList.toggle('active', !palettePanel.hidden);
+  if (palettePanel.hidden) { swapMode = false; swapFrom = null; swapTo = null; }
+  renderPaletteUI();
+  resizeCanvas();
+});
+$('btn-palette-close').addEventListener('click', () => {
+  palettePanel.hidden = true;
+  $('btn-palette').classList.remove('active');
+  swapMode = false; swapFrom = null; swapTo = null;
+  resizeCanvas();
+});
+
+// 캔버스에서 픽셀 색 집기 (색 대치 모드)
+function pickCanvasColor(x, y) {
+  const v = viewScale();
+  const px = Math.floor((x - state.panX) / v);
+  const py = Math.floor((y - state.panY) / v);
+  if (px < 0 || py < 0 || px >= docCanvas.width || py >= docCanvas.height) return;
+  const d = docCtx.getImageData(px, py, 1, 1).data;
+  if (d[3] === 0) return;   // 투명은 무시
+  swapFrom = [d[0], d[1], d[2]];
+  renderPaletteUI();
+}
+
+/* ===== 팔레트 파일 가져오기 ===== */
+function parsePaletteFile(bytes) {
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  const colors = [];
+  const push = (r, g, b) => {
+    const hex = rgbToHex(r, g, b);
+    if (!colors.includes(hex)) colors.push(hex);
+  };
+  if (/^JASC-PAL/i.test(text)) {
+    // JASC-PAL / 0100 / 개수 / "r g b" ...
+    for (const line of text.split(/\r?\n/).slice(3)) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)/);
+      if (m) push(+m[1], +m[2], +m[3]);
+    }
+  } else if (/^GIMP Palette/i.test(text)) {
+    for (const line of text.split(/\r?\n/).slice(1)) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)/);
+      if (m) push(+m[1], +m[2], +m[3]);
+    }
+  } else if (/^[\s#;0-9a-fA-F\r\n]+$/.test(text) && /[0-9a-fA-F]{6}/.test(text)) {
+    // .hex (Lospec): 한 줄에 색 하나
+    for (const m of text.matchAll(/(?:#|^|\s)([0-9a-fA-F]{6})(?=\s|$)/gm)) {
+      const [r, g, b] = hexToRGB('#' + m[1]);
+      push(r, g, b);
+    }
+  } else if (bytes.length >= 192 && bytes.length % 3 === 0) {
+    // NES .pal 바이너리: RGB 트리플렛, 앞 64색만
+    for (let i = 0; i < Math.min(64 * 3, bytes.length); i += 3) {
+      push(bytes[i], bytes[i + 1], bytes[i + 2]);
+    }
+  }
+  return colors.slice(0, 64);
+}
+
+function setMasterPalette(colors) {
+  masterPalette = colors;
+  tileQuantCache.clear();
+  renderPaletteUI();
+  dbReq('kv', 'readwrite', s => s.put({ key: 'masterPalette', colors })).catch(() => {});
+}
+
+$('pal-file').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const colors = parsePaletteFile(bytes);
+    if (colors.length < 2) {
+      alert('팔레트를 읽지 못했습니다. 지원 형식: NES .pal(바이너리), JASC .pal, .hex, .gpl');
+      return;
+    }
+    setMasterPalette(colors);
+  } catch (_) {
+    alert('팔레트 파일을 여는 중 오류가 발생했습니다.');
+  }
+});
+
+$('pal-reset').addEventListener('click', () => setMasterPalette(NES_MASTER.slice()));
 
 /* ===== 행/열 시프트 (글리치) ===== */
 const shiftState = { active: false, start: null, axis: null, snap: null };
@@ -808,6 +1053,12 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
   if (pointers.size > 1) return;
+
+  // 색 대치 모드: 캔버스 탭 = 픽셀 색 집기
+  if (swapMode && !palettePanel.hidden) {
+    pickCanvasColor(e.offsetX, e.offsetY);
+    return;
+  }
 
   const { cx, cy } = screenToCell(e.offsetX, e.offsetY);
   drawing = true;
@@ -1167,6 +1418,8 @@ function setLayer(layer) {
   state.activeLayer = layer;
   $('layer-bg').classList.toggle('active', layer === 'bg');
   $('layer-sprite').classList.toggle('active', layer === 'sprite');
+  palSelectedSlot = null;
+  if (!palettePanel.hidden) renderPaletteUI();
 }
 $('layer-bg').addEventListener('click', () => setLayer('bg'));
 $('layer-sprite').addEventListener('click', () => setLayer('sprite'));
@@ -1247,6 +1500,7 @@ function serializeDoc() {
     sprite: Array.from(state.sprite),
     atlas: atlas.canvas.toDataURL('image/png'),
     atlasCount: atlas.count,
+    nes: JSON.parse(JSON.stringify(state.nes)),
     name: state.projectName,
     thumb: docCanvas.toDataURL('image/png'),
     updated: Date.now(),
@@ -1265,7 +1519,11 @@ function loadDoc(doc) {
       atlas.count = doc.atlasCount;
       rebuildAtlasKeys();
       tileTransformCache.clear();   // 아틀라스가 교체되었으므로 변환 캐시 무효화
-      tileRecolorCache.clear();
+      tileQuantCache.clear();
+      tileSwapCache.clear();
+      if (doc.nes) state.nes = doc.nes;
+      // 마스터 팔레트는 전역(kv 'masterPalette')으로만 관리 — 문서에 저장하지 않음
+      if (!palettePanel.hidden) renderPaletteUI();
       state.gridW = doc.gridW;
       state.gridH = doc.gridH;
       state.bg = Int32Array.from(doc.bg);
@@ -1417,10 +1675,15 @@ window.addEventListener('resize', () => {
 window.addEventListener('contextmenu', (e) => e.preventDefault());
 
 async function init() {
+  state.nes = defaultNesState();
   newDoc(32, 24);
   updateSizeLabel();
   updateOnline();
   loadAssetIndex();
+  try {
+    const row = await dbReq('kv', 'readonly', s => s.get('masterPalette'));
+    if (row && row.colors && row.colors.length >= 2) masterPalette = row.colors.slice();
+  } catch (_) { /* 무시 */ }
   const restored = await restoreAutosave();
   if (!restored) {
     fitView();
