@@ -56,15 +56,44 @@
       <button id="sel-delete">삭제</button>
       <button id="sel-dup">복제</button>
       <button id="sel-brush">브러시로</button>
-      <select id="sel-palette" title="리컬러 팔레트">
-        <option value="nes" selected>NES</option>
-        <option value="gameboy">게임보이</option>
-        <option value="gray4">흑백</option>
-      </select>
-      <button id="sel-recolor">팔레트 적용</button>
       <button id="sel-done">확정</button>
     </div>
   </main>
+
+  <!-- NES 팔레트 패널: 서브팔레트(3색+공용 배경색) 편집·양자화·색 대치 -->
+  <section id="palette-panel" hidden>
+    <div id="palette-header">
+      <span id="pal-set-label">BG 팔레트</span>
+      <div id="pal-tabs"></div>
+      <button id="pal-swap-toggle" class="chip alt">색 대치</button>
+      <button id="pal-apply" class="chip">전체에 적용</button>
+      <button id="btn-palette-close" class="tool small">✕</button>
+    </div>
+    <div id="palette-body">
+      <div class="pal-row" id="pal-slot-row">
+        <span class="pal-label">배경색</span>
+        <button class="pal-slot" id="pal-backdrop" title="공용 배경색"></button>
+        <span class="pal-label">서브팔레트</span>
+        <div id="pal-slots"></div>
+        <span class="hint" id="pal-hint">슬롯을 탭한 뒤 아래에서 색을 고르세요</span>
+      </div>
+      <div class="pal-row" id="pal-swap-row" hidden>
+        <span class="pal-label">원본</span>
+        <span class="pal-slot" id="swap-from"></span>
+        <span class="pal-label">→</span>
+        <span class="pal-slot" id="swap-to"></span>
+        <button id="swap-exec" class="chip">대치 실행</button>
+        <span class="hint" id="swap-hint">캔버스를 탭해 원본 색을 집으세요</span>
+      </div>
+      <div id="master-grid"></div>
+      <div class="pal-row">
+        <label class="chip file-label2">팔레트 파일 가져오기 (.pal/.hex/.gpl)
+          <input id="pal-file" type="file" hidden>
+        </label>
+        <button id="pal-reset" class="chip alt">기본 NES로</button>
+      </div>
+    </div>
+  </section>
 
   <!-- 소스 패널: 분절된 타일 소스, 탭=타일 선택 / 드래그=범위 선택 -->
   <section id="source-panel">
@@ -83,12 +112,13 @@
       <button class="tool tool-mode active" data-tool="stamp" title="스탬프">🖌</button>
       <button class="tool tool-mode" data-tool="pattern" title="패턴 채우기">▦</button>
       <button class="tool tool-mode" data-tool="select" title="선택 (이동/복제/삭제)">⬚</button>
-      <button class="tool tool-mode" data-tool="picker" title="타일 스포이드">💧</button>
+      <button class="tool tool-mode" data-tool="picker" title="타일 집기 (탭한 칸의 타일을 브러시로)">👆</button>
       <button class="tool tool-mode" data-tool="eraser" title="지우개">◽️</button>
       <button class="tool tool-mode" data-tool="shift" title="행/열 밀기 (글리치)">⇆</button>
       <button class="tool tool-mode" data-tool="scatter" title="랜덤 교란">🎲</button>
     </div>
     <div class="group">
+      <button id="btn-palette" class="tool" title="NES 팔레트">🎨</button>
       <span class="size-label">브러시</span>
       <canvas id="brush-preview" width="48" height="48"></canvas>
       <button id="brush-rot" class="tool small" title="브러시 90° 회전">⟳</button>
