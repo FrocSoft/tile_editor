@@ -110,6 +110,109 @@ function drawTile(target, idx, dx, dy) {
   target.drawImage(atlas.canvas, sx, sy, TILE, TILE, dx, dy, TILE, TILE);
 }
 
+/* ===== 타일 픽셀 변환 (회전/반전/리컬러) ===== */
+const tileTransformCache = new Map();   // "idx:op" -> 변환된 타일 인덱스
+
+function transformTile(idx, op) {
+  if (idx < 0) return -1;
+  const key = `${idx}:${op}`;
+  const cached = tileTransformCache.get(key);
+  if (cached !== undefined) return cached;
+  const { sx, sy } = atlasPos(idx);
+  const src = atlas.ctx.getImageData(sx, sy, TILE, TILE);
+  const out = new ImageData(TILE, TILE);
+  const s = new Uint32Array(src.data.buffer);
+  const d = new Uint32Array(out.data.buffer);
+  for (let y = 0; y < TILE; y++) {
+    for (let x = 0; x < TILE; x++) {
+      let px = x, py = y;
+      if (op === 'rot90') { px = y; py = TILE - 1 - x; }        // 시계방향 90°
+      else if (op === 'flipH') { px = TILE - 1 - x; }
+      else if (op === 'flipV') { py = TILE - 1 - y; }
+      d[y * TILE + x] = s[py * TILE + px];
+    }
+  }
+  const result = atlasAdd(out);
+  tileTransformCache.set(key, result);
+  return result;
+}
+
+function transformBrush(op) {
+  const b = state.brush;
+  if (!b) return;
+  let w = b.w, h = b.h;
+  const cells = new Int32Array(b.w * b.h);
+  for (let y = 0; y < b.h; y++) {
+    for (let x = 0; x < b.w; x++) {
+      const t = transformTile(b.cells[y * b.w + x], op);
+      if (op === 'rot90') cells[x * b.h + (b.h - 1 - y)] = t;   // (x,y) -> (h-1-y, x)
+      else if (op === 'flipH') cells[y * b.w + (b.w - 1 - x)] = t;
+      else cells[(b.h - 1 - y) * b.w + x] = t;
+    }
+  }
+  if (op === 'rot90') { w = b.h; h = b.w; }
+  state.brush = { w, h, cells };
+  renderBrushPreview();
+}
+
+/* ===== 레트로 팔레트 리컬러 ===== */
+const PALETTES = {
+  nes: [
+    '#666666', '#002A88', '#1412A7', '#3B00A4', '#5C007E', '#6E0040', '#6C0600', '#561D00',
+    '#333500', '#0B4800', '#005200', '#004F08', '#00404D', '#000000',
+    '#ADADAD', '#155FD9', '#4240FF', '#7527FE', '#A01ACC', '#B71E7B', '#B53120', '#994E00',
+    '#6B6D00', '#388700', '#0C9300', '#008F32', '#007C8D',
+    '#FFFEFF', '#64B0FF', '#9290FF', '#C676FF', '#F36AFF', '#FE6ECC', '#FE8170', '#EA9E22',
+    '#BCBE00', '#88D800', '#5CE430', '#45E082', '#48CDDE', '#4F4F4F',
+    '#C0DFFF', '#D3D2FF', '#E8C8FF', '#FBC2FF', '#FEC4EA', '#FECCC5', '#F7D8A5',
+    '#E4E594', '#CFEF96', '#BDF4AB', '#B3F3CC', '#B5EBF2', '#B8B8B8',
+  ],
+  gameboy: ['#0F380F', '#306230', '#8BAC0F', '#9BBC0F'],
+  gray4: ['#000000', '#555555', '#AAAAAA', '#FFFFFF'],
+};
+// hex -> [r,g,b] 미리 계산
+const paletteRGB = {};
+for (const [name, list] of Object.entries(PALETTES)) {
+  paletteRGB[name] = list.map(hex => [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16),
+  ]);
+}
+
+const nearestCache = new Map();   // "pal:rgb" -> [r,g,b]
+function nearestColor(r, g, b, pal) {
+  const key = pal + ':' + ((r << 16) | (g << 8) | b);
+  const hit = nearestCache.get(key);
+  if (hit) return hit;
+  let best = null, bestDist = Infinity;
+  for (const [pr, pg, pb] of paletteRGB[pal]) {
+    const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
+    if (d < bestDist) { bestDist = d; best = [pr, pg, pb]; }
+  }
+  nearestCache.set(key, best);
+  return best;
+}
+
+const tileRecolorCache = new Map();   // "idx:pal" -> 리컬러된 타일 인덱스
+function recolorTile(idx, pal) {
+  if (idx < 0) return -1;
+  const key = `${idx}:${pal}`;
+  const cached = tileRecolorCache.get(key);
+  if (cached !== undefined) return cached;
+  const { sx, sy } = atlasPos(idx);
+  const img = atlas.ctx.getImageData(sx, sy, TILE, TILE);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue;
+    const [r, g, b] = nearestColor(d[i], d[i + 1], d[i + 2], pal);
+    d[i] = r; d[i + 1] = g; d[i + 2] = b;
+  }
+  const result = atlasAdd(img);
+  tileRecolorCache.set(key, result);
+  return result;
+}
+
 function rebuildAtlasKeys() {
   atlas.keys.clear();
   for (let i = 0; i < atlas.count; i++) {
@@ -337,6 +440,16 @@ function render() {
     ctx.setLineDash([]);
   }
 
+  // 패턴 채우기 드래그 영역
+  if (patternRect) {
+    const r = patternRect;
+    ctx.strokeStyle = '#9ece6a';
+    ctx.lineWidth = 2 / v;
+    ctx.setLineDash([6 / v, 4 / v]);
+    ctx.strokeRect(r.x * TILE, r.y * TILE, r.w * TILE, r.h * TILE);
+    ctx.setLineDash([]);
+  }
+
   // 격자
   const cell = v * TILE;
   if (state.showGrid && cell >= 6) {
@@ -479,6 +592,16 @@ function inRect(cx, cy, r) {
   return r && cx >= r.x && cy >= r.y && cx < r.x + r.w && cy < r.y + r.h;
 }
 
+function buildFloatCanvas(cells, w, h) {
+  const fc = document.createElement('canvas');
+  fc.width = w * TILE; fc.height = h * TILE;
+  const fctx = fc.getContext('2d');
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) drawTile(fctx, cells[y * w + x], x * TILE, y * TILE);
+  }
+  return fc;
+}
+
 function liftSelection() {
   // 선택 영역을 활성 레이어에서 들어 올려 플로팅으로 전환
   const s = state.sel;
@@ -489,15 +612,44 @@ function liftSelection() {
   for (let y = 0; y < s.h; y++) {
     for (let x = 0; x < s.w; x++) cells[(s.y + y) * state.gridW + (s.x + x)] = -1;
   }
-  const fc = document.createElement('canvas');
-  fc.width = s.w * TILE; fc.height = s.h * TILE;
-  const fctx = fc.getContext('2d');
-  for (let y = 0; y < s.h; y++) {
-    for (let x = 0; x < s.w; x++) drawTile(fctx, lifted[y * s.w + x], x * TILE, y * TILE);
-  }
-  state.floating = { x: s.x, y: s.y, w: s.w, h: s.h, cells: lifted, canvas: fc };
+  state.floating = {
+    x: s.x, y: s.y, w: s.w, h: s.h,
+    cells: lifted, canvas: buildFloatCanvas(lifted, s.w, s.h),
+  };
   state.sel = null;
   renderAll();
+}
+
+function duplicateSelection() {
+  // 선택 영역을 원본은 그대로 둔 채 복사해 플로팅으로
+  const s = state.sel;
+  if (!s) return;
+  pushUndo();
+  const copied = rectCells(s, activeCells());
+  state.floating = {
+    x: s.x, y: s.y, w: s.w, h: s.h,
+    cells: copied, canvas: buildFloatCanvas(copied, s.w, s.h),
+  };
+  state.sel = null;
+  renderAll();
+}
+
+function stampFloatingInPlace() {
+  // 플로팅 내용을 현재 위치에 찍되 플로팅은 유지 (연속 도장)
+  const f = state.floating;
+  if (!f) return;
+  pushUndo();
+  const cells = activeCells();
+  for (let y = 0; y < f.h; y++) {
+    for (let x = 0; x < f.w; x++) {
+      const t = f.cells[y * f.w + x];
+      if (t < 0) continue;
+      const gx = f.x + x, gy = f.y + y;
+      if (inGrid(gx, gy)) cells[gy * state.gridW + gx] = t;
+    }
+  }
+  renderAll();
+  autosaveSoon();
 }
 
 function commitFloating() {
@@ -570,6 +722,38 @@ $('sel-brush').addEventListener('click', () => {
 
 $('sel-done').addEventListener('click', clearSelection);
 
+$('sel-dup').addEventListener('click', () => {
+  if (state.floating) stampFloatingInPlace();
+  else duplicateSelection();
+  updateSelectionBar();
+});
+
+$('sel-recolor').addEventListener('click', () => {
+  const pal = $('sel-palette').value;
+  if (state.floating) {
+    // 플로팅 자체를 리컬러 (아직 확정 전이므로 undo는 lift 시점 것을 공유)
+    const f = state.floating;
+    for (let i = 0; i < f.cells.length; i++) f.cells[i] = recolorTile(f.cells[i], pal);
+    f.canvas = buildFloatCanvas(f.cells, f.w, f.h);
+  } else if (state.sel) {
+    pushUndo();
+    const s = state.sel;
+    const cells = activeCells();
+    for (let y = 0; y < s.h; y++) {
+      for (let x = 0; x < s.w; x++) {
+        const i = (s.y + y) * state.gridW + (s.x + x);
+        cells[i] = recolorTile(cells[i], pal);
+      }
+    }
+  }
+  renderAll();
+  autosaveSoon();
+});
+
+$('brush-rot').addEventListener('click', () => transformBrush('rot90'));
+$('brush-fliph').addEventListener('click', () => transformBrush('flipH'));
+$('brush-flipv').addEventListener('click', () => transformBrush('flipV'));
+
 /* ===== 행/열 시프트 (글리치) ===== */
 const shiftState = { active: false, start: null, axis: null, snap: null };
 
@@ -606,6 +790,8 @@ let pinch = null;
 let undoPushed = false;
 let marqueeStart = null;
 let floatDrag = null;      // {startCx, startCy, origX, origY}
+let patternStart = null;   // 패턴 채우기 드래그 시작 셀
+let patternRect = null;    // 패턴 채우기 미리보기 영역
 
 canvas.addEventListener('pointerdown', (e) => {
   canvas.setPointerCapture(e.pointerId);
@@ -654,6 +840,13 @@ canvas.addEventListener('pointerdown', (e) => {
       shiftState.start = { cx, cy };
       shiftState.axis = null;
       shiftState.snap = activeCells().slice();
+      break;
+    case 'pattern':
+      if (state.brush) {
+        patternStart = { cx, cy };
+        patternRect = normRect(patternStart, patternStart);
+        render();
+      }
       break;
     case 'select':
       if (state.floating && inRect(cx, cy, state.floating)) {
@@ -708,6 +901,12 @@ canvas.addEventListener('pointermove', (e) => {
         renderAll();
       }
       break;
+    case 'pattern':
+      if (patternStart) {
+        patternRect = normRect(patternStart, { cx, cy });
+        render();
+      }
+      break;
     case 'select':
       if (floatDrag && state.floating) {
         state.floating.x = floatDrag.origX + (cx - floatDrag.startCx);
@@ -732,6 +931,25 @@ function endPointer(e) {
   }
   shiftState.active = false;
   shiftState.snap = null;
+
+  if (state.tool === 'pattern' && patternStart) {
+    // 드래그 영역을 브러시 블록으로 반복 타일링
+    const r = patternRect;
+    const b = state.brush;
+    if (r && b) {
+      pushUndo();
+      const cells = activeCells();
+      for (let y = 0; y < r.h; y++) {
+        for (let x = 0; x < r.w; x++) {
+          const t = b.cells[(y % b.h) * b.w + (x % b.w)];
+          if (t >= 0) cells[(r.y + y) * state.gridW + (r.x + x)] = t;
+        }
+      }
+      renderDoc();
+    }
+    patternStart = null;
+    patternRect = null;
+  }
 
   if (state.tool === 'select') {
     if (marqueeStart && !state.sel) {
@@ -763,6 +981,8 @@ function cancelStroke() {
   shiftState.snap = null;
   marqueeStart = null;
   floatDrag = null;
+  patternStart = null;
+  patternRect = null;
   drawing = false;
   lastCell = null;
   renderAll();
@@ -1044,6 +1264,8 @@ function loadDoc(doc) {
       atlas.ctx.drawImage(img, 0, 0);
       atlas.count = doc.atlasCount;
       rebuildAtlasKeys();
+      tileTransformCache.clear();   // 아틀라스가 교체되었으므로 변환 캐시 무효화
+      tileRecolorCache.clear();
       state.gridW = doc.gridW;
       state.gridH = doc.gridH;
       state.bg = Int32Array.from(doc.bg);
