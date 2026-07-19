@@ -1,0 +1,16 @@
+{
+  "name": "Glitch Tile Editor",
+  "short_name": "GlitchTile",
+  "description": "오프라인에서 동작하는 아이패드용 8비트 글리치 타일 편집기",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1a1b26",
+  "theme_color": "#1a1b26",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

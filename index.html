@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Glitch Tile Editor</title>
+<meta name="description" content="오프라인에서 동작하는 아이패드용 8비트 글리치 타일 편집기">
+<meta name="theme-color" content="#1a1b26">
+<!-- iOS 홈 화면 앱 설정 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="GlitchTile">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="group">
+      <button id="btn-menu" class="tool" title="프로젝트">☰</button>
+      <button id="btn-assets" class="tool" title="에셋">🗂</button>
+      <button id="btn-undo" class="tool" title="실행 취소">↩︎</button>
+      <button id="btn-redo" class="tool" title="다시 실행">↪︎</button>
+    </div>
+    <div class="group" id="layer-controls">
+      <div class="seg">
+        <button id="layer-bg" class="seg-btn" title="배경 레이어 선택">BG</button>
+        <button id="layer-sprite" class="seg-btn active" title="스프라이트 레이어 선택">SPR</button>
+      </div>
+      <button id="vis-bg" class="tool small active" title="배경 표시">👁</button>
+      <button id="vis-sprite" class="tool small active" title="스프라이트 표시">👁</button>
+    </div>
+    <div class="group" id="size-controls">
+      <span class="size-label">W</span>
+      <button id="w-minus" class="tool small">−</button>
+      <button id="w-plus" class="tool small">＋</button>
+      <span class="size-label">H</span>
+      <button id="h-minus" class="tool small">−</button>
+      <button id="h-plus" class="tool small">＋</button>
+      <span id="size-value">32×24</span>
+    </div>
+    <div class="group">
+      <button id="btn-grid" class="tool active" title="격자 표시">#</button>
+      <button id="btn-export" class="tool" title="PNG 내보내기">⬇︎</button>
+      <span id="offline-badge" hidden>오프라인</span>
+      <span id="zoom-label">100%</span>
+    </div>
+  </header>
+
+  <main id="stage">
+    <canvas id="canvas"></canvas>
+    <!-- 선택 영역 액션 바 -->
+    <div id="selection-bar" hidden>
+      <button id="sel-delete">삭제</button>
+      <button id="sel-brush">브러시로</button>
+      <button id="sel-done">확정</button>
+    </div>
+  </main>
+
+  <!-- 소스 패널: 분절된 타일 소스, 탭=타일 선택 / 드래그=범위 선택 -->
+  <section id="source-panel">
+    <div id="source-header">
+      <button id="btn-source-toggle" class="tool small">▾</button>
+      <span id="source-name">에셋을 선택하세요</span>
+      <button id="btn-place" class="chip" hidden>캔버스에 배치</button>
+    </div>
+    <div id="source-body">
+      <canvas id="source-canvas"></canvas>
+    </div>
+  </section>
+
+  <footer id="toolbar">
+    <div class="group tools">
+      <button class="tool tool-mode active" data-tool="stamp" title="스탬프">🖌</button>
+      <button class="tool tool-mode" data-tool="select" title="선택 (이동/삭제)">⬚</button>
+      <button class="tool tool-mode" data-tool="picker" title="타일 스포이드">💧</button>
+      <button class="tool tool-mode" data-tool="eraser" title="지우개">◽️</button>
+      <button class="tool tool-mode" data-tool="shift" title="행/열 밀기 (글리치)">⇆</button>
+      <button class="tool tool-mode" data-tool="scatter" title="랜덤 교란">🎲</button>
+    </div>
+    <div class="group">
+      <span class="size-label">브러시</span>
+      <canvas id="brush-preview" width="48" height="48"></canvas>
+    </div>
+  </footer>
+
+  <!-- 에셋 브라우저 서랍 -->
+  <div id="asset-drawer" class="drawer hidden">
+    <div class="drawer-panel">
+      <h2>에셋</h2>
+      <div id="asset-list"></div>
+      <h3>직접 가져오기</h3>
+      <label class="big file-label">
+        이미지 선택 (사진/파일)
+        <input id="file-input" type="file" accept="image/*" hidden>
+      </label>
+      <p class="hint">이미지는 8×8 픽셀 단위로 분절되어 타일 브러시가 됩니다. 리포의 assets/ 폴더에 PNG를 넣고 tools/build_asset_index.py를 실행하면 목록에 추가됩니다.</p>
+      <button class="big btn-close-drawer">닫기</button>
+    </div>
+  </div>
+
+  <!-- 프로젝트 서랍 -->
+  <div id="project-drawer" class="drawer hidden">
+    <div class="drawer-panel">
+      <h2>프로젝트</h2>
+      <div class="drawer-row">
+        <button id="btn-new" class="big">새 캔버스</button>
+      </div>
+      <div class="drawer-row">
+        <input id="save-name" type="text" placeholder="이름" autocomplete="off">
+        <button id="btn-save" class="big">저장</button>
+      </div>
+      <h3>저장된 작업</h3>
+      <ul id="saved-list"></ul>
+      <p class="hint">모든 데이터는 이 기기(IndexedDB)에 저장되며 인터넷 없이 동작합니다.</p>
+      <button class="big btn-close-drawer">닫기</button>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "backgrounds": [
+    "bricks.png",
+    "clouds.png",
+    "dungeon.png"
+  ],
+  "characters": [
+    "hero_walk.png",
+    "slime.png"
+  ],
+  "glitch": [
+    "noise.png",
+    "scanline_bars.png"
+  ]
+}
