@@ -9,8 +9,20 @@
     "slime.png"
   ],
   "font": [
-    "Galmuri11_16x16.png",
-    "Galmuri9_16x16.png"
+    "Galmuri11_1_가-넣.png",
+    "Galmuri11_2_네-량.png",
+    "Galmuri11_3_러-뷰.png",
+    "Galmuri11_4_뷴-씔.png",
+    "Galmuri11_5_씜-즘.png",
+    "Galmuri11_6_즙-탱.png",
+    "Galmuri11_7_탸-힝.png",
+    "Galmuri9_1_가-넣.png",
+    "Galmuri9_2_네-량.png",
+    "Galmuri9_3_러-뷰.png",
+    "Galmuri9_4_뷴-씔.png",
+    "Galmuri9_5_씜-즘.png",
+    "Galmuri9_6_즙-탱.png",
+    "Galmuri9_7_탸-힝.png"
   ],
   "glitch": [
     "noise.png",
