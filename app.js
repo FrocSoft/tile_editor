@@ -40,6 +40,8 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const canvas = $('canvas');
 const ctx = canvas.getContext('2d');
+let mainDpr = 1;   // 렌더 시작마다 변환을 리셋해, 예외로 어긋난 프레임이 누적되지 않게 함
+let srcDpr = 1;
 const stage = $('stage');
 const sourceCanvas = $('source-canvas');
 const sourceCtx = sourceCanvas.getContext('2d');
@@ -159,6 +161,8 @@ function atlasAdd(bytes) {
 function drawTile(target, idx, dx, dy) {
   if (idx < 0 || idx >= atlas.count) return;
   const { sx, sy } = atlasPos(idx);
+  // 소스 사각형이 캔버스 밖이면 iOS Safari는 예외를 던진다 — 조용히 건너뜀
+  if (sy + TILE > atlas.canvas.height || sx + TILE > atlas.canvas.width) return;
   target.drawImage(atlas.canvas, sx, sy, TILE, TILE, dx, dy, TILE, TILE);
 }
 
@@ -518,6 +522,7 @@ function renderDoc() {
 
 function render() {
   const r = stage.getBoundingClientRect();
+  ctx.setTransform(mainDpr, 0, 0, mainDpr, 0, 0);   // 이전 프레임 예외로 남은 변환 제거
   ctx.clearRect(0, 0, r.width, r.height);
   const v = viewScale();
   const W = state.gridW * TILE, H = state.gridH * TILE;
@@ -602,6 +607,7 @@ function resizeCanvas() {
   canvas.style.width = r.width + 'px';
   canvas.style.height = r.height + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  mainDpr = dpr;
   checkerPattern = null;
   render();
 }
@@ -1336,6 +1342,7 @@ function resizeSourceCanvas() {
   sourceCanvas.style.width = rect.width + 'px';
   sourceCanvas.style.height = rect.height + 'px';
   sourceCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  srcDpr = dpr;
   renderSourcePanel();
 }
 
@@ -1369,6 +1376,7 @@ function buildSourceBitmap() {
 
 function renderSourcePanel() {
   const rect = sourceCanvas.getBoundingClientRect();
+  sourceCtx.setTransform(srcDpr, 0, 0, srcDpr, 0, 0);   // 이전 프레임 예외로 남은 변환 제거
   sourceCtx.clearRect(0, 0, rect.width, rect.height);
   const src = state.source;
   if (!src) return;
@@ -1923,6 +1931,30 @@ async function init() {
   resizeSourceCanvas();
 }
 init();
+
+/* ===== 오류 표시 (기기에서 원인 확인용) ===== */
+function showError(msg) {
+  let el = document.getElementById('err-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'err-overlay';
+    const pre = document.createElement('pre');
+    const close = document.createElement('button');
+    close.textContent = '닫기';
+    close.addEventListener('click', () => el.remove());
+    el.append(pre, close);
+    document.body.appendChild(el);
+  }
+  const pre = el.querySelector('pre');
+  pre.textContent = (pre.textContent + '\n' + msg).trim().split('\n').slice(-6).join('\n');
+}
+window.addEventListener('error', (e) => {
+  showError(`${e.message} (${(e.filename || '').split('/').pop()}:${e.lineno})`);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  showError('비동기 오류: ' + (r && r.message ? r.message : String(r)));
+});
 
 /* ===== 테스트/디버그 훅 ===== */
 window.__state = () => state;
