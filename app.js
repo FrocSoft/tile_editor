@@ -283,6 +283,8 @@ function sliceImage(img, name) {
   $('source-name').textContent = `${name} — ${gw}×${gh} 타일`;
   $('btn-place').hidden = false;
   $('source-panel').classList.remove('collapsed');
+  resizeSourceCanvas();
+  fitSourceView();
   renderSourcePanel();
   autosaveSoon();
 }
@@ -1240,60 +1242,125 @@ function cancelStroke() {
   renderAll();
 }
 
-/* ===== 소스 패널 ===== */
-let srcCellPx = 16;
+/* ===== 소스 패널 (핀치 줌/팬 가능한 뷰) ===== */
+const srcView = { zoom: 1, panX: 0, panY: 0 };
+let srcFit = 1;                 // 화면에 꽉 차는 기준 배율
+const srcPointers = new Map();
+let srcPinch = null;
 let srcDrag = null;
 
-function renderSourcePanel() {
-  const src = state.source;
+function srcScale() { return srcFit * srcView.zoom; }   // 화면px / 소스px
+
+function resizeSourceCanvas() {
   const body = $('source-body');
-  if (!src) {
-    sourceCanvas.width = sourceCanvas.height = 0;
-    return;
-  }
-  const availW = Math.max(120, body.clientWidth - 20);
-  const availH = 170;
-  srcCellPx = Math.max(3, Math.min(28,
-    Math.floor(availW / src.w), Math.floor(availH / src.h)));
-  sourceCanvas.width = src.w * TILE;
-  sourceCanvas.height = src.h * TILE;
-  sourceCanvas.style.width = src.w * srcCellPx + 'px';
-  sourceCanvas.style.height = src.h * srcCellPx + 'px';
+  const rect = body.getBoundingClientRect();
+  if (rect.width < 10 || rect.height < 10) return;      // 접힘 상태
+  const dpr = window.devicePixelRatio || 1;
+  sourceCanvas.width = rect.width * dpr;
+  sourceCanvas.height = rect.height * dpr;
+  sourceCanvas.style.width = rect.width + 'px';
+  sourceCanvas.style.height = rect.height + 'px';
+  sourceCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  renderSourcePanel();
+}
+
+function fitSourceView() {
+  const src = state.source;
+  if (!src) return;
+  const rect = $('source-body').getBoundingClientRect();
+  if (rect.width < 10) return;
+  srcFit = Math.min(rect.width / (src.w * TILE), rect.height / (src.h * TILE));
+  srcView.zoom = 1;
+  const v = srcScale();
+  srcView.panX = (rect.width - src.w * TILE * v) / 2;
+  srcView.panY = (rect.height - src.h * TILE * v) / 2;
+}
+
+function renderSourcePanel() {
+  const rect = sourceCanvas.getBoundingClientRect();
+  sourceCtx.clearRect(0, 0, rect.width, rect.height);
+  const src = state.source;
+  if (!src) return;
+  const v = srcScale();
+  sourceCtx.save();
+  sourceCtx.translate(srcView.panX, srcView.panY);
+  sourceCtx.scale(v, v);
   sourceCtx.imageSmoothingEnabled = false;
-  sourceCtx.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
-  for (let y = 0; y < src.h; y++) {
-    for (let x = 0; x < src.w; x++) {
+  // 보이는 범위만 그리기 (큰 시트 성능)
+  const x0 = Math.max(0, Math.floor(-srcView.panX / (v * TILE)));
+  const y0 = Math.max(0, Math.floor(-srcView.panY / (v * TILE)));
+  const x1 = Math.min(src.w - 1, Math.ceil((rect.width - srcView.panX) / (v * TILE)));
+  const y1 = Math.min(src.h - 1, Math.ceil((rect.height - srcView.panY) / (v * TILE)));
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
       drawTile(sourceCtx, src.cells[y * src.w + x], x * TILE, y * TILE);
     }
   }
+  // 외곽선
+  sourceCtx.strokeStyle = 'rgba(255,255,255,0.25)';
+  sourceCtx.lineWidth = 1 / v;
+  sourceCtx.strokeRect(0, 0, src.w * TILE, src.h * TILE);
+  // 선택 범위
   if (state.srcSel) {
     const s = state.srcSel;
     sourceCtx.strokeStyle = '#7aa2f7';
-    sourceCtx.lineWidth = 1.5;
-    sourceCtx.strokeRect(s.x * TILE + 0.75, s.y * TILE + 0.75, s.w * TILE - 1.5, s.h * TILE - 1.5);
+    sourceCtx.lineWidth = 2 / v;
+    sourceCtx.strokeRect(s.x * TILE, s.y * TILE, s.w * TILE, s.h * TILE);
   }
+  sourceCtx.restore();
 }
 
-function srcCellFromEvent(e) {
+function srcCellFromPoint(x, y) {
   const src = state.source;
+  const cell = srcScale() * TILE;
   return {
-    cx: Math.min(src.w - 1, Math.max(0, Math.floor(e.offsetX / srcCellPx))),
-    cy: Math.min(src.h - 1, Math.max(0, Math.floor(e.offsetY / srcCellPx))),
+    cx: Math.min(src.w - 1, Math.max(0, Math.floor((x - srcView.panX) / cell))),
+    cy: Math.min(src.h - 1, Math.max(0, Math.floor((y - srcView.panY) / cell))),
   };
 }
 
 sourceCanvas.addEventListener('pointerdown', (e) => {
   if (!state.source) return;
   sourceCanvas.setPointerCapture(e.pointerId);
-  const c = srcCellFromEvent(e);
-  srcDrag = { start: c, moved: false };
+  srcPointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+
+  if (srcPointers.size === 2 && e.pointerType === 'touch') {
+    // 두 손가락: 선택 취소하고 핀치 줌/팬
+    srcDrag = null;
+    const [p1, p2] = [...srcPointers.values()];
+    srcPinch = {
+      dist: Math.hypot(p1.x - p2.x, p1.y - p2.y),
+      cx: (p1.x + p2.x) / 2, cy: (p1.y + p2.y) / 2,
+      panX: srcView.panX, panY: srcView.panY, zoom: srcView.zoom,
+    };
+    return;
+  }
+  if (srcPointers.size > 1) return;
+
+  const c = srcCellFromPoint(e.offsetX, e.offsetY);
+  srcDrag = { start: c };
   state.srcSel = { x: c.cx, y: c.cy, w: 1, h: 1 };
   renderSourcePanel();
 });
+
 sourceCanvas.addEventListener('pointermove', (e) => {
+  if (!srcPointers.has(e.pointerId)) return;
+  srcPointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+
+  if (srcPinch && srcPointers.size === 2) {
+    const [p1, p2] = [...srcPointers.values()];
+    const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    const cx = (p1.x + p2.x) / 2, cy = (p1.y + p2.y) / 2;
+    srcView.zoom = Math.min(40, Math.max(0.5, srcPinch.zoom * (dist / srcPinch.dist)));
+    const applied = srcView.zoom / srcPinch.zoom;
+    srcView.panX = cx - (srcPinch.cx - srcPinch.panX) * applied;
+    srcView.panY = cy - (srcPinch.cy - srcPinch.panY) * applied;
+    renderSourcePanel();
+    return;
+  }
   if (!srcDrag || !state.source) return;
-  const c = srcCellFromEvent(e);
-  if (c.cx !== srcDrag.start.cx || c.cy !== srcDrag.start.cy) srcDrag.moved = true;
+
+  const c = srcCellFromPoint(e.offsetX, e.offsetY);
   const x = Math.min(srcDrag.start.cx, c.cx);
   const y = Math.min(srcDrag.start.cy, c.cy);
   state.srcSel = {
@@ -1303,8 +1370,11 @@ sourceCanvas.addEventListener('pointermove', (e) => {
   };
   renderSourcePanel();
 });
-function srcPointerEnd() {
-  if (!srcDrag || !state.source) { srcDrag = null; return; }
+
+function srcPointerEnd(e) {
+  srcPointers.delete(e.pointerId);
+  if (srcPointers.size < 2) srcPinch = null;
+  if (!srcDrag || !state.source || srcPointers.size > 0) return;
   const s = state.srcSel;
   const src = state.source;
   const cells = new Int32Array(s.w * s.h);
@@ -1320,11 +1390,30 @@ function srcPointerEnd() {
 sourceCanvas.addEventListener('pointerup', srcPointerEnd);
 sourceCanvas.addEventListener('pointercancel', srcPointerEnd);
 
+// 데스크톱: 휠 = 커서 기준 줌
+sourceCanvas.addEventListener('wheel', (e) => {
+  if (!state.source) return;
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+  const newZoom = Math.min(40, Math.max(0.5, srcView.zoom * factor));
+  const applied = newZoom / srcView.zoom;
+  srcView.zoom = newZoom;
+  srcView.panX = e.offsetX - (e.offsetX - srcView.panX) * applied;
+  srcView.panY = e.offsetY - (e.offsetY - srcView.panY) * applied;
+  renderSourcePanel();
+}, { passive: false });
+
+$('btn-source-fit').addEventListener('click', () => {
+  fitSourceView();
+  renderSourcePanel();
+});
+
 $('btn-source-toggle').addEventListener('click', (e) => {
   const panel = $('source-panel');
   panel.classList.toggle('collapsed');
   e.currentTarget.textContent = panel.classList.contains('collapsed') ? '▴' : '▾';
-  if (!panel.classList.contains('collapsed')) renderSourcePanel();
+  if (!panel.classList.contains('collapsed')) resizeSourceCanvas();
+  resizeCanvas();   // 스테이지 높이가 변하므로 메인 캔버스도 갱신
 });
 
 $('btn-place').addEventListener('click', () => {
@@ -1719,7 +1808,7 @@ window.addEventListener('offline', updateOnline);
 /* ===== 초기화 ===== */
 window.addEventListener('resize', () => {
   resizeCanvas();
-  renderSourcePanel();
+  resizeSourceCanvas();
 });
 window.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -1741,6 +1830,7 @@ async function init() {
   } else {
     resizeCanvas();
   }
+  resizeSourceCanvas();
 }
 init();
 
@@ -1761,6 +1851,10 @@ window.__layerHash = (layer) => {
 window.__cellCenter = (cx, cy) => {
   const cell = viewScale() * TILE;
   return { x: state.panX + (cx + 0.5) * cell, y: state.panY + (cy + 0.5) * cell };
+};
+window.__srcCellCenter = (cx, cy) => {
+  const cell = srcScale() * TILE;
+  return { x: srcView.panX + (cx + 0.5) * cell, y: srcView.panY + (cy + 0.5) * cell };
 };
 
 /* ===== 서비스 워커 등록 (오프라인 지원) ===== */
