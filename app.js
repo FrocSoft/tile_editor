@@ -49,21 +49,44 @@ const sizeValue = $('size-value');
 const selectionBar = $('selection-bar');
 
 /* ===== 아틀라스 ===== */
+/* 타일 픽셀의 원본 저장소는 CPU 버퍼(atlas.buf)이고, 캔버스는 drawImage용
+ * 파생물이다. iOS Safari에서 캔버스 읽기/쓰기를 대량 반복하면 앱이 강제
+ * 종료되므로, 분절처럼 타일이 대량 추가되는 동안에는 캔버스 쓰기를 미뤘다가
+ * syncAtlasCanvas()로 한 번에 반영한다. */
+const TILE_BYTES = TILE * TILE * 4;
+
 const atlas = {
   canvas: document.createElement('canvas'),
   ctx: null,
   count: 0,
   keys: new Map(),        // 타일 픽셀 키 -> 인덱스 (dedup)
+  buf: new Uint8ClampedArray(TILE_BYTES * 256),
+  cap: 256,
 };
 atlas.canvas.width = ATLAS_COLS * TILE;
 atlas.canvas.height = TILE;
 atlas.ctx = atlas.canvas.getContext('2d', { willReadFrequently: true });
 
+let atlasBatch = false;                 // true면 캔버스 반영을 sync 시점까지 지연
+const scratchImage = new ImageData(TILE, TILE);
+
 function atlasPos(i) {
   return { sx: (i % ATLAS_COLS) * TILE, sy: Math.floor(i / ATLAS_COLS) * TILE };
 }
 
-function atlasEnsure(count) {
+function tileBytes(i) {
+  return atlas.buf.subarray(i * TILE_BYTES, (i + 1) * TILE_BYTES);
+}
+
+function atlasEnsureBuf(count) {
+  if (count <= atlas.cap) return;
+  atlas.cap = Math.max(count, atlas.cap * 2);
+  const grown = new Uint8ClampedArray(TILE_BYTES * atlas.cap);
+  grown.set(atlas.buf);
+  atlas.buf = grown;
+}
+
+function atlasEnsureCanvas(count) {
   const rows = Math.max(1, Math.ceil(count / ATLAS_COLS));
   const needed = rows * TILE;
   if (atlas.canvas.height >= needed) return;
@@ -77,6 +100,35 @@ function atlasEnsure(count) {
   atlas.ctx = gctx;
 }
 
+function putTileToCanvas(idx) {
+  atlasEnsureCanvas(atlas.count);
+  scratchImage.data.set(tileBytes(idx));
+  const { sx, sy } = atlasPos(idx);
+  atlas.ctx.putImageData(scratchImage, sx, sy);
+}
+
+function syncAtlasCanvas() {
+  // buf 전체를 캔버스에 putImageData 1회로 반영 (배치 종료 시)
+  const rows = Math.max(1, Math.ceil(atlas.count / ATLAS_COLS));
+  const needed = rows * TILE;
+  if (atlas.canvas.height < needed) {
+    atlas.canvas.height = Math.max(needed, atlas.canvas.height * 2);   // 리사이즈로 클리어됨
+    atlas.ctx = atlas.canvas.getContext('2d', { willReadFrequently: true });
+  }
+  const img = new ImageData(ATLAS_COLS * TILE, rows * TILE);
+  const rowBytes = TILE * 4;
+  const imgRowBytes = ATLAS_COLS * TILE * 4;
+  for (let i = 0; i < atlas.count; i++) {
+    const bytes = tileBytes(i);
+    const { sx, sy } = atlasPos(i);
+    for (let y = 0; y < TILE; y++) {
+      img.data.set(bytes.subarray(y * rowBytes, (y + 1) * rowBytes),
+        (sy + y) * imgRowBytes + sx * 4);
+    }
+  }
+  atlas.ctx.putImageData(img, 0, 0);
+}
+
 function tileKey(data) {
   let key = '';
   for (let i = 0; i < data.length; i += 8) {
@@ -87,21 +139,20 @@ function tileKey(data) {
   return key;
 }
 
-function atlasAdd(imageData) {
-  const d = imageData.data;
+function atlasAdd(bytes) {
   let empty = true;
-  for (let i = 3; i < d.length; i += 4) {
-    if (d[i] !== 0) { empty = false; break; }
+  for (let i = 3; i < bytes.length; i += 4) {
+    if (bytes[i] !== 0) { empty = false; break; }
   }
   if (empty) return -1;
-  const key = tileKey(d);
+  const key = tileKey(bytes);
   const found = atlas.keys.get(key);
   if (found !== undefined) return found;
   const idx = atlas.count++;
-  atlasEnsure(atlas.count);
-  const { sx, sy } = atlasPos(idx);
-  atlas.ctx.putImageData(imageData, sx, sy);
+  atlasEnsureBuf(atlas.count);
+  atlas.buf.set(bytes, idx * TILE_BYTES);
   atlas.keys.set(key, idx);
+  if (!atlasBatch) putTileToCanvas(idx);
   return idx;
 }
 
@@ -119,11 +170,10 @@ function transformTile(idx, op) {
   const key = `${idx}:${op}`;
   const cached = tileTransformCache.get(key);
   if (cached !== undefined) return cached;
-  const { sx, sy } = atlasPos(idx);
-  const src = atlas.ctx.getImageData(sx, sy, TILE, TILE);
-  const out = new ImageData(TILE, TILE);
-  const s = new Uint32Array(src.data.buffer);
-  const d = new Uint32Array(out.data.buffer);
+  const src = tileBytes(idx);
+  const out = new Uint8ClampedArray(TILE_BYTES);
+  const s = new Uint32Array(src.buffer, src.byteOffset, TILE * TILE);
+  const d = new Uint32Array(out.buffer);
   for (let y = 0; y < TILE; y++) {
     for (let x = 0; x < TILE; x++) {
       let px = x, py = y;
@@ -216,15 +266,13 @@ function quantizeTile(idx, hexColors) {
   const cached = tileQuantCache.get(key);
   if (cached !== undefined) return cached;
   const rgbList = hexColors.map(hexToRGB);
-  const { sx, sy } = atlasPos(idx);
-  const img = atlas.ctx.getImageData(sx, sy, TILE, TILE);
-  const d = img.data;
+  const d = Uint8ClampedArray.from(tileBytes(idx));
   for (let i = 0; i < d.length; i += 4) {
     if (d[i + 3] === 0) continue;
     const [r, g, b] = nearestInList(d[i], d[i + 1], d[i + 2], rgbList);
     d[i] = r; d[i + 1] = g; d[i + 2] = b;
   }
-  const result = atlasAdd(img);
+  const result = atlasAdd(d);
   tileQuantCache.set(key, result);
   return result;
 }
@@ -235,9 +283,7 @@ function swapTileColor(idx, fromRGB, toRGB) {
   const key = idx + '|' + fromRGB.join(',') + '|' + toRGB.join(',');
   const cached = tileSwapCache.get(key);
   if (cached !== undefined) return cached;
-  const { sx, sy } = atlasPos(idx);
-  const img = atlas.ctx.getImageData(sx, sy, TILE, TILE);
-  const d = img.data;
+  const d = Uint8ClampedArray.from(tileBytes(idx));
   let touched = false;
   for (let i = 0; i < d.length; i += 4) {
     if (d[i + 3] === 0) continue;
@@ -246,32 +292,25 @@ function swapTileColor(idx, fromRGB, toRGB) {
       touched = true;
     }
   }
-  const result = touched ? atlasAdd(img) : idx;
+  const result = touched ? atlasAdd(d) : idx;
   tileSwapCache.set(key, result);
   return result;
 }
 
-function extractTile(buf, imgW, tx, ty) {
-  // 큰 버퍼에서 8×8 타일 픽셀을 행 단위로 복사 (캔버스 API 불호출 — iOS 안전)
-  const img = new ImageData(TILE, TILE);
-  const d = img.data;
+function extractTileBytes(buf, imgW, tx, ty, out) {
+  // 큰 버퍼에서 8×8 타일 픽셀을 행 단위로 복사 (캔버스 API·할당 불호출 — iOS 안전)
   const rowBytes = TILE * 4;
   for (let y = 0; y < TILE; y++) {
     const srcOff = ((ty * TILE + y) * imgW + tx * TILE) * 4;
-    d.set(buf.subarray(srcOff, srcOff + rowBytes), y * rowBytes);
+    out.set(buf.subarray(srcOff, srcOff + rowBytes), y * rowBytes);
   }
-  return img;
+  return out;
 }
 
 function rebuildAtlasKeys() {
   atlas.keys.clear();
-  if (!atlas.count) return;
-  // 아틀라스 전체를 1회만 읽고 버퍼에서 키 재구성
-  const buf = atlas.ctx.getImageData(0, 0, atlas.canvas.width, atlas.canvas.height).data;
   for (let i = 0; i < atlas.count; i++) {
-    atlas.keys.set(
-      tileKey(extractTile(buf, atlas.canvas.width, i % ATLAS_COLS, Math.floor(i / ATLAS_COLS)).data),
-      i);
+    atlas.keys.set(tileKey(tileBytes(i)), i);
   }
 }
 
@@ -292,17 +331,26 @@ async function sliceImage(img, name) {
   cc.drawImage(img, 0, 0, w, h);
   // 전체를 1회만 읽는다 — 타일마다 getImageData를 부르면 iOS에서 리드백 폭증으로 앱이 종료됨
   const buf = cc.getImageData(0, 0, w, h).data;
+  c.width = c.height = 0;   // 임시 캔버스 메모리 즉시 반환 (iOS)
   const gw = w / TILE, gh = h / TILE;
   const cells = new Int32Array(gw * gh);
+  const scratch = new Uint8ClampedArray(TILE_BYTES);
   $('source-name').textContent = `${name} — 분절 중…`;
-  for (let ty = 0; ty < gh; ty++) {
-    for (let tx = 0; tx < gw; tx++) {
-      cells[ty * gw + tx] = atlasAdd(extractTile(buf, w, tx, ty));
+  // 캔버스 쓰기도 배치로 미룬다 — 고유 타일마다 putImageData를 하면 iOS에서 종료됨
+  atlasBatch = true;
+  try {
+    for (let ty = 0; ty < gh; ty++) {
+      for (let tx = 0; tx < gw; tx++) {
+        cells[ty * gw + tx] = atlasAdd(extractTileBytes(buf, w, tx, ty, scratch));
+      }
+      if (ty % 16 === 15) {
+        await new Promise(r => setTimeout(r, 0));   // UI에 양보 (저사양 기기 응답성)
+        if (seq !== sliceSeq) return;               // 더 새로운 분절이 시작됨
+      }
     }
-    if (ty % 16 === 15) {
-      await new Promise(r => setTimeout(r, 0));   // UI에 양보 (저사양 기기 응답성)
-      if (seq !== sliceSeq) return;               // 더 새로운 분절이 시작됨
-    }
+  } finally {
+    atlasBatch = false;
+    syncAtlasCanvas();   // 추가된 타일 전체를 putImageData 1회로 반영
   }
   state.source = { name, w: gw, h: gh, cells };
   state.srcSel = null;
@@ -1641,6 +1689,13 @@ function loadDoc(doc) {
       atlas.ctx.imageSmoothingEnabled = false;
       atlas.ctx.drawImage(img, 0, 0);
       atlas.count = doc.atlasCount;
+      // 캔버스 → CPU 버퍼 복원 (전체 1회 읽기)
+      atlasEnsureBuf(atlas.count);
+      const whole = atlas.ctx.getImageData(0, 0, atlas.canvas.width, atlas.canvas.height).data;
+      for (let i = 0; i < atlas.count; i++) {
+        extractTileBytes(whole, atlas.canvas.width, i % ATLAS_COLS, Math.floor(i / ATLAS_COLS),
+          tileBytes(i));
+      }
       rebuildAtlasKeys();
       tileTransformCache.clear();   // 아틀라스가 교체되었으므로 변환 캐시 무효화
       tileQuantCache.clear();
