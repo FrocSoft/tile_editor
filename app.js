@@ -318,36 +318,55 @@ function rebuildAtlasKeys() {
   }
 }
 
-/* ===== 이미지 분절 ===== */
-let sliceSeq = 0;   // 분절 도중 다른 에셋을 누르면 이전 작업 중단
+/* ===== 이미지 분절 (대형 이미지는 자동 페이지 분할) ===== */
+let sliceSeq = 0;               // 분절 도중 다른 에셋을 누르면 이전 작업 중단
+const PAGE_TILE_BUDGET = 1536;  // 페이지당 최대 타일 수 — 저사양 iOS에서 안전한 상한
+let sourceMeta = null;          // 현재 소스의 원본 이미지·페이징 정보
 
 async function sliceImage(img, name) {
   const seq = ++sliceSeq;
   let w = img.naturalWidth || img.width;
   let h = img.naturalHeight || img.height;
-  const scaleDown = Math.min(1, 1024 / Math.max(w, h));
+  const scaleDown = Math.min(1, 2048 / Math.max(w, h));
   w = Math.max(TILE, Math.floor((w * scaleDown) / TILE) * TILE);
   h = Math.max(TILE, Math.floor((h * scaleDown) / TILE) * TILE);
+  const gw = w / TILE, gh = h / TILE;
+  const rowsPerPage = Math.max(1, Math.min(gh, Math.floor(PAGE_TILE_BUDGET / gw)));
+  sourceMeta = {
+    img, name, w, h, gw, gh, rowsPerPage,
+    pageCount: Math.ceil(gh / rowsPerPage),
+  };
+  await slicePage(0, seq);
+}
+
+async function slicePage(pageIdx, seq = ++sliceSeq) {
+  const m = sourceMeta;
+  if (!m) return;
+  const rowStart = pageIdx * m.rowsPerPage;
+  const rows = Math.min(m.rowsPerPage, m.gh - rowStart);
+  // 해당 페이지 영역만 리샘플해서 1회 읽는다 — 큰 이미지도 페이지 단위라 가볍다
   const c = document.createElement('canvas');
-  c.width = w; c.height = h;
+  c.width = m.w; c.height = rows * TILE;
   const cc = c.getContext('2d', { willReadFrequently: true });
   cc.imageSmoothingEnabled = false;
-  cc.drawImage(img, 0, 0, w, h);
-  // 전체를 1회만 읽는다 — 타일마다 getImageData를 부르면 iOS에서 리드백 폭증으로 앱이 종료됨
-  const buf = cc.getImageData(0, 0, w, h).data;
+  const iw = m.img.naturalWidth || m.img.width;
+  const ih = m.img.naturalHeight || m.img.height;
+  cc.drawImage(m.img,
+    0, rowStart * TILE * (ih / m.h), iw, rows * TILE * (ih / m.h),
+    0, 0, m.w, rows * TILE);
+  const buf = cc.getImageData(0, 0, m.w, rows * TILE).data;
   c.width = c.height = 0;   // 임시 캔버스 메모리 즉시 반환 (iOS)
-  const gw = w / TILE, gh = h / TILE;
-  const cells = new Int32Array(gw * gh);
+  const cells = new Int32Array(m.gw * rows);
   const scratch = new Uint8ClampedArray(TILE_BYTES);
-  $('source-name').textContent = `${name} — 분절 중…`;
+  $('source-name').textContent = `${m.name} — 분절 중…`;
   // 캔버스 쓰기도 배치로 미룬다 — 고유 타일마다 putImageData를 하면 iOS에서 종료됨
   atlasBatch = true;
   try {
-    for (let ty = 0; ty < gh; ty++) {
-      for (let tx = 0; tx < gw; tx++) {
-        cells[ty * gw + tx] = atlasAdd(extractTileBytes(buf, w, tx, ty, scratch));
+    for (let ty = 0; ty < rows; ty++) {
+      for (let tx = 0; tx < m.gw; tx++) {
+        cells[ty * m.gw + tx] = atlasAdd(extractTileBytes(buf, m.w, tx, ty, scratch));
       }
-      if (ty % 16 === 15) {
+      if (ty % 8 === 7) {
         await new Promise(r => setTimeout(r, 0));   // UI에 양보 (저사양 기기 응답성)
         if (seq !== sliceSeq) return;               // 더 새로운 분절이 시작됨
       }
@@ -356,16 +375,28 @@ async function sliceImage(img, name) {
     atlasBatch = false;
     syncAtlasCanvas();   // 추가된 타일 전체를 putImageData 1회로 반영
   }
-  state.source = { name, w: gw, h: gh, cells };
+  state.source = { name: m.name, w: m.gw, h: rows, cells, page: pageIdx, pageCount: m.pageCount };
   state.srcSel = null;
   buildSourceBitmap();
-  $('source-name').textContent = `${name} — ${gw}×${gh} 타일`;
+  const pageInfo = m.pageCount > 1 ? ` ${pageIdx + 1}/${m.pageCount}쪽` : '';
+  $('source-name').textContent = `${m.name}${pageInfo} — ${m.gw}×${rows} 타일`;
   $('btn-place').hidden = false;
+  updateSourcePager();
   $('source-panel').classList.remove('collapsed');
   resizeSourceCanvas();
   fitSourceView();
   renderSourcePanel();
   autosaveSoon();
+}
+
+function updateSourcePager() {
+  const multi = !!(sourceMeta && sourceMeta.pageCount > 1);
+  $('src-prev').hidden = !multi;
+  $('src-next').hidden = !multi;
+  if (multi && state.source) {
+    $('src-prev').disabled = state.source.page === 0;
+    $('src-next').disabled = state.source.page >= sourceMeta.pageCount - 1;
+  }
 }
 
 /* ===== 문서 (레이어) ===== */
@@ -1508,6 +1539,15 @@ $('btn-source-fit').addEventListener('click', () => {
   renderSourcePanel();
 });
 
+$('src-prev').addEventListener('click', () => {
+  if (sourceMeta && state.source && state.source.page > 0) slicePage(state.source.page - 1);
+});
+$('src-next').addEventListener('click', () => {
+  if (sourceMeta && state.source && state.source.page < sourceMeta.pageCount - 1) {
+    slicePage(state.source.page + 1);
+  }
+});
+
 $('btn-source-toggle').addEventListener('click', (e) => {
   const panel = $('source-panel');
   panel.classList.toggle('collapsed');
@@ -1578,17 +1618,19 @@ async function loadAssetIndex() {
   }
 }
 
+let importObjectUrl = null;   // 페이지 넘김 시 재사용하므로 다음 가져오기 전까지 유지
+
 $('file-input').addEventListener('change', (e) => {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
-  const url = URL.createObjectURL(file);
+  if (importObjectUrl) URL.revokeObjectURL(importObjectUrl);
+  importObjectUrl = URL.createObjectURL(file);
   const img = new Image();
   img.onload = () => {
     sliceImage(img, file.name.replace(/\.[^.]+$/, ''));
-    URL.revokeObjectURL(url);
     closeDrawers();
   };
-  img.src = url;
+  img.src = importObjectUrl;
   e.target.value = '';
 });
 
@@ -1734,6 +1776,8 @@ function loadDoc(doc) {
       state.source = null;
       state.srcSel = null;
       sourceBitmap = null;
+      sourceMeta = null;
+      updateSourcePager();
       $('source-name').textContent = '에셋을 선택하세요';
       $('btn-place').hidden = true;
       renderSourcePanel();
