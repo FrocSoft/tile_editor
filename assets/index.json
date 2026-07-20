@@ -8,6 +8,10 @@
     "hero_walk.png",
     "slime.png"
   ],
+  "font": [
+    "Galmuri11_16x16.png",
+    "Galmuri9_16x16.png"
+  ],
   "glitch": [
     "noise.png",
     "scanline_bars.png"
