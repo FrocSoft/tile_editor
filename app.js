@@ -251,16 +251,35 @@ function swapTileColor(idx, fromRGB, toRGB) {
   return result;
 }
 
+function extractTile(buf, imgW, tx, ty) {
+  // 큰 버퍼에서 8×8 타일 픽셀을 행 단위로 복사 (캔버스 API 불호출 — iOS 안전)
+  const img = new ImageData(TILE, TILE);
+  const d = img.data;
+  const rowBytes = TILE * 4;
+  for (let y = 0; y < TILE; y++) {
+    const srcOff = ((ty * TILE + y) * imgW + tx * TILE) * 4;
+    d.set(buf.subarray(srcOff, srcOff + rowBytes), y * rowBytes);
+  }
+  return img;
+}
+
 function rebuildAtlasKeys() {
   atlas.keys.clear();
+  if (!atlas.count) return;
+  // 아틀라스 전체를 1회만 읽고 버퍼에서 키 재구성
+  const buf = atlas.ctx.getImageData(0, 0, atlas.canvas.width, atlas.canvas.height).data;
   for (let i = 0; i < atlas.count; i++) {
-    const { sx, sy } = atlasPos(i);
-    atlas.keys.set(tileKey(atlas.ctx.getImageData(sx, sy, TILE, TILE).data), i);
+    atlas.keys.set(
+      tileKey(extractTile(buf, atlas.canvas.width, i % ATLAS_COLS, Math.floor(i / ATLAS_COLS)).data),
+      i);
   }
 }
 
 /* ===== 이미지 분절 ===== */
-function sliceImage(img, name) {
+let sliceSeq = 0;   // 분절 도중 다른 에셋을 누르면 이전 작업 중단
+
+async function sliceImage(img, name) {
+  const seq = ++sliceSeq;
   let w = img.naturalWidth || img.width;
   let h = img.naturalHeight || img.height;
   const scaleDown = Math.min(1, 1024 / Math.max(w, h));
@@ -271,15 +290,23 @@ function sliceImage(img, name) {
   const cc = c.getContext('2d', { willReadFrequently: true });
   cc.imageSmoothingEnabled = false;
   cc.drawImage(img, 0, 0, w, h);
+  // 전체를 1회만 읽는다 — 타일마다 getImageData를 부르면 iOS에서 리드백 폭증으로 앱이 종료됨
+  const buf = cc.getImageData(0, 0, w, h).data;
   const gw = w / TILE, gh = h / TILE;
   const cells = new Int32Array(gw * gh);
+  $('source-name').textContent = `${name} — 분절 중…`;
   for (let ty = 0; ty < gh; ty++) {
     for (let tx = 0; tx < gw; tx++) {
-      cells[ty * gw + tx] = atlasAdd(cc.getImageData(tx * TILE, ty * TILE, TILE, TILE));
+      cells[ty * gw + tx] = atlasAdd(extractTile(buf, w, tx, ty));
+    }
+    if (ty % 16 === 15) {
+      await new Promise(r => setTimeout(r, 0));   // UI에 양보 (저사양 기기 응답성)
+      if (seq !== sliceSeq) return;               // 더 새로운 분절이 시작됨
     }
   }
   state.source = { name, w: gw, h: gh, cells };
   state.srcSel = null;
+  buildSourceBitmap();
   $('source-name').textContent = `${name} — ${gw}×${gh} 타일`;
   $('btn-place').hidden = false;
   $('source-panel').classList.remove('collapsed');
@@ -1276,6 +1303,22 @@ function fitSourceView() {
   srcView.panY = (rect.height - src.h * TILE * v) / 2;
 }
 
+let sourceBitmap = null;   // 소스 그리드 사전 렌더 (매 프레임 drawImage 1회로 줄임)
+
+function buildSourceBitmap() {
+  const src = state.source;
+  if (!src) { sourceBitmap = null; return; }
+  sourceBitmap = document.createElement('canvas');
+  sourceBitmap.width = src.w * TILE;
+  sourceBitmap.height = src.h * TILE;
+  const bctx = sourceBitmap.getContext('2d');
+  for (let y = 0; y < src.h; y++) {
+    for (let x = 0; x < src.w; x++) {
+      drawTile(bctx, src.cells[y * src.w + x], x * TILE, y * TILE);
+    }
+  }
+}
+
 function renderSourcePanel() {
   const rect = sourceCanvas.getBoundingClientRect();
   sourceCtx.clearRect(0, 0, rect.width, rect.height);
@@ -1286,16 +1329,7 @@ function renderSourcePanel() {
   sourceCtx.translate(srcView.panX, srcView.panY);
   sourceCtx.scale(v, v);
   sourceCtx.imageSmoothingEnabled = false;
-  // 보이는 범위만 그리기 (큰 시트 성능)
-  const x0 = Math.max(0, Math.floor(-srcView.panX / (v * TILE)));
-  const y0 = Math.max(0, Math.floor(-srcView.panY / (v * TILE)));
-  const x1 = Math.min(src.w - 1, Math.ceil((rect.width - srcView.panX) / (v * TILE)));
-  const y1 = Math.min(src.h - 1, Math.ceil((rect.height - srcView.panY) / (v * TILE)));
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      drawTile(sourceCtx, src.cells[y * src.w + x], x * TILE, y * TILE);
-    }
-  }
+  if (sourceBitmap) sourceCtx.drawImage(sourceBitmap, 0, 0);
   // 외곽선
   sourceCtx.strokeStyle = 'rgba(255,255,255,0.25)';
   sourceCtx.lineWidth = 1 / v;
@@ -1626,6 +1660,7 @@ function loadDoc(doc) {
       state.brush = null;
       state.source = null;
       state.srcSel = null;
+      sourceBitmap = null;
       $('source-name').textContent = '에셋을 선택하세요';
       $('btn-place').hidden = true;
       renderSourcePanel();
