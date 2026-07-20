@@ -1366,12 +1366,22 @@ function buildSourceBitmap() {
   sourceBitmap = document.createElement('canvas');
   sourceBitmap.width = src.w * TILE;
   sourceBitmap.height = src.h * TILE;
-  const bctx = sourceBitmap.getContext('2d');
-  for (let y = 0; y < src.h; y++) {
-    for (let x = 0; x < src.w; x++) {
-      drawTile(bctx, src.cells[y * src.w + x], x * TILE, y * TILE);
+  // CPU 버퍼에서 조립해 putImageData 1회 — 셀마다 drawImage하면 iOS가 버거워함
+  const img = new ImageData(sourceBitmap.width, sourceBitmap.height);
+  const rowBytes = TILE * 4;
+  const imgRowBytes = sourceBitmap.width * 4;
+  for (let cy = 0; cy < src.h; cy++) {
+    for (let cx = 0; cx < src.w; cx++) {
+      const idx = src.cells[cy * src.w + cx];
+      if (idx < 0 || idx >= atlas.count) continue;
+      const bytes = tileBytes(idx);
+      for (let y = 0; y < TILE; y++) {
+        img.data.set(bytes.subarray(y * rowBytes, (y + 1) * rowBytes),
+          (cy * TILE + y) * imgRowBytes + cx * rowBytes);
+      }
     }
   }
+  sourceBitmap.getContext('2d').putImageData(img, 0, 0);
 }
 
 function renderSourcePanel() {
