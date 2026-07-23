@@ -1180,6 +1180,7 @@ let panDrag = null;        // 마우스 가운데 버튼 팬 {x, y, panX, panY}
 let hoverCell = null;      // 마우스 호버 셀 (브러시 고스트 표시용)
 
 canvas.addEventListener('pointerdown', (e) => {
+  if (!exportMenu.hidden) exportMenu.hidden = true;   // 캔버스 터치 시 내보내기 창 닫기
   // 마우스 가운데 버튼: 캔버스 이동 (데스크탑)
   if (e.pointerType === 'mouse' && e.button === 1) {
     e.preventDefault();
@@ -1763,8 +1764,21 @@ $('btn-grid').addEventListener('click', (e) => {
 $('btn-undo').addEventListener('click', undo);
 $('btn-redo').addEventListener('click', redo);
 
-/* ===== PNG 내보내기 ===== */
+/* ===== 내보내기 (⬇︎ → PNG/Aseprite 선택창) ===== */
+const exportMenu = $('export-menu');
 $('btn-export').addEventListener('click', () => {
+  exportMenu.hidden = !exportMenu.hidden;
+});
+$('export-png').addEventListener('click', () => {
+  exportMenu.hidden = true;
+  exportPNG();
+});
+$('export-ase').addEventListener('click', () => {
+  exportMenu.hidden = true;
+  exportAseprite();
+});
+
+function exportPNG() {
   commitFloating();
   renderDoc();
   const SCALE = 4;
@@ -1780,7 +1794,147 @@ $('btn-export').addEventListener('click', () => {
   document.body.appendChild(a);
   a.click();
   a.remove();
-});
+}
+
+/* ===== Aseprite(.aseprite) 내보내기 =====
+ * 파일 스펙: https://github.com/aseprite/aseprite/blob/main/docs/ase-file-specs.md
+ * BG/스프라이트를 실제 레이어 2장으로, 32bpp RGBA, 8×8 그리드 설정 포함.
+ */
+function layerToRGBA(cells) {
+  const W = state.gridW * TILE, H = state.gridH * TILE;
+  const out = new Uint8ClampedArray(W * H * 4);
+  const rowBytes = TILE * 4;
+  const outRowBytes = W * 4;
+  for (let cy = 0; cy < state.gridH; cy++) {
+    for (let cx = 0; cx < state.gridW; cx++) {
+      const idx = cells[cy * state.gridW + cx];
+      if (idx < 0 || idx >= atlas.count) continue;
+      const bytes = tileBytes(idx);
+      for (let y = 0; y < TILE; y++) {
+        out.set(bytes.subarray(y * rowBytes, (y + 1) * rowBytes),
+          (cy * TILE + y) * outRowBytes + cx * rowBytes);
+      }
+    }
+  }
+  return out;
+}
+
+async function zlibDeflate(bytes) {
+  if (typeof CompressionStream === 'undefined') return null;   // 미지원 → raw cel로 대체
+  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function aseWriter() {
+  const parts = [];
+  let length = 0;
+  const push = (arr) => { parts.push(arr); length += arr.length; };
+  const num = (value, byteLen) => {
+    const a = new Uint8Array(byteLen);
+    for (let i = 0; i < byteLen; i++) a[i] = (value >>> (i * 8)) & 0xff;   // 리틀엔디언
+    push(a);
+  };
+  return {
+    u8: (v) => num(v, 1),
+    u16: (v) => num(v, 2),
+    u32: (v) => num(v, 4),
+    i16: (v) => num(v < 0 ? v + 0x10000 : v, 2),
+    bytes: push,
+    zeros: (n) => push(new Uint8Array(n)),
+    size: () => length,
+    concat() {
+      const out = new Uint8Array(length);
+      let off = 0;
+      for (const p of parts) { out.set(p, off); off += p.length; }
+      return out;
+    },
+  };
+}
+
+async function exportAseprite() {
+  commitFloating();
+  const W = state.gridW * TILE, H = state.gridH * TILE;
+  const layers = [
+    { name: 'Background', pixels: layerToRGBA(state.bg) },
+    { name: 'Sprite', pixels: layerToRGBA(state.sprite) },
+  ];
+  for (const l of layers) l.zlib = await zlibDeflate(l.pixels);
+
+  // 청크들 먼저 조립
+  const chunks = [];
+  const addChunk = (type, body) => {
+    const w = aseWriter();
+    w.u32(body.length + 6);
+    w.u16(type);
+    w.bytes(body);
+    chunks.push(w.concat());
+  };
+  {   // 색 프로파일 (sRGB)
+    const w = aseWriter();
+    w.u16(1); w.u16(0); w.u32(0); w.zeros(8);
+    addChunk(0x2007, w.concat());
+  }
+  for (const l of layers) {   // 레이어 청크
+    const w = aseWriter();
+    w.u16(3);                 // flags: visible | editable
+    w.u16(0); w.u16(0);       // type, child level
+    w.u16(0); w.u16(0);       // 무시되는 기본 크기
+    w.u16(0);                 // blend: normal
+    w.u8(255); w.zeros(3);    // opacity + reserved
+    const name = new TextEncoder().encode(l.name);
+    w.u16(name.length); w.bytes(name);
+    addChunk(0x2004, w.concat());
+  }
+  layers.forEach((l, i) => {  // 셀 청크 (레이어당 1개)
+    const w = aseWriter();
+    w.u16(i);                 // layer index
+    w.i16(0); w.i16(0);       // x, y
+    w.u8(255);                // opacity
+    w.u16(l.zlib ? 2 : 0);    // cel type: 2=zlib 압축, 0=raw
+    w.i16(0); w.zeros(5);     // z-index + reserved
+    w.u16(W); w.u16(H);
+    w.bytes(l.zlib || l.pixels);
+    addChunk(0x2005, w.concat());
+  });
+
+  // 프레임 1개
+  const frame = aseWriter();
+  const chunkBytes = chunks.reduce((s, c) => s + c.length, 0);
+  frame.u32(16 + chunkBytes);          // 프레임 크기 (헤더 16 + 청크)
+  frame.u16(0xF1FA);                   // 프레임 매직
+  frame.u16(chunks.length);            // (구) 청크 수
+  frame.u16(100);                      // 프레임 시간(ms)
+  frame.zeros(2);
+  frame.u32(chunks.length);            // (신) 청크 수
+  for (const c of chunks) frame.bytes(c);
+  const frameData = frame.concat();
+
+  // 파일 헤더 (128바이트)
+  const head = aseWriter();
+  head.u32(128 + frameData.length);    // 파일 크기
+  head.u16(0xA5E0);                    // 파일 매직
+  head.u16(1);                         // 프레임 수
+  head.u16(W); head.u16(H);
+  head.u16(32);                        // 색 깊이: RGBA
+  head.u32(1);                         // flags: 레이어 불투명도 유효
+  head.u16(100);                       // (구) 속도
+  head.u32(0); head.u32(0);
+  head.u8(0); head.zeros(3);           // 투명 인덱스 + 예약
+  head.u16(0);                         // 색 수 (RGBA에선 무시)
+  head.u8(1); head.u8(1);              // 픽셀 비율 1:1
+  head.i16(0); head.i16(0);            // 그리드 원점
+  head.u16(TILE); head.u16(TILE);      // 그리드 크기 8×8
+  head.zeros(84);
+
+  const blob = new Blob([head.concat(), frameData], { type: 'application/octet-stream' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (state.projectName || 'tile') + '.aseprite';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
 
 /* ===== 저장 (IndexedDB) ===== */
 const DB_NAME = 'glitch-tile-editor';
