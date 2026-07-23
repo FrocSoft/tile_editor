@@ -99,7 +99,7 @@ button.tool:active { opacity: 0.7; }
     repeating-conic-gradient(#16161e 0% 25%, #1f2335 0% 50%) 0 0 / 24px 24px;
 }
 
-#canvas { position: absolute; top: 0; left: 0; touch-action: none; }
+#canvas { position: absolute; top: 0; left: 0; touch-action: none; cursor: crosshair; }
 
 /* 선택 액션 바 */
 #selection-bar {

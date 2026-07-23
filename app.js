@@ -601,6 +601,30 @@ function render() {
     ctx.setLineDash([]);
   }
 
+  // 마우스 호버: 브러시 고스트 / 셀 하이라이트 (데스크탑)
+  if (hoverCell && !drawing) {
+    const hc = hoverCell;
+    if ((state.tool === 'stamp' || state.tool === 'pattern') && state.brush) {
+      const b = state.brush;
+      const ox = state.tool === 'stamp' ? hc.cx - Math.floor(b.w / 2) : hc.cx;
+      const oy = state.tool === 'stamp' ? hc.cy - Math.floor(b.h / 2) : hc.cy;
+      ctx.globalAlpha = 0.5;
+      for (let y = 0; y < b.h; y++) {
+        for (let x = 0; x < b.w; x++) {
+          drawTile(ctx, b.cells[y * b.w + x], (ox + x) * TILE, (oy + y) * TILE);
+        }
+      }
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = 1.5 / v;
+      ctx.strokeRect(ox * TILE, oy * TILE, b.w * TILE, b.h * TILE);
+    } else if (inGrid(hc.cx, hc.cy)) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = 1.5 / v;
+      ctx.strokeRect(hc.cx * TILE, hc.cy * TILE, TILE, TILE);
+    }
+  }
+
   // 격자
   const cell = v * TILE;
   if (state.showGrid && cell >= 6) {
@@ -1152,8 +1176,17 @@ let marqueeStart = null;
 let floatDrag = null;      // {startCx, startCy, origX, origY}
 let patternStart = null;   // 패턴 채우기 드래그 시작 셀
 let patternRect = null;    // 패턴 채우기 미리보기 영역
+let panDrag = null;        // 마우스 가운데 버튼 팬 {x, y, panX, panY}
+let hoverCell = null;      // 마우스 호버 셀 (브러시 고스트 표시용)
 
 canvas.addEventListener('pointerdown', (e) => {
+  // 마우스 가운데 버튼: 캔버스 이동 (데스크탑)
+  if (e.pointerType === 'mouse' && e.button === 1) {
+    e.preventDefault();
+    canvas.setPointerCapture(e.pointerId);
+    panDrag = { x: e.offsetX, y: e.offsetY, panX: state.panX, panY: state.panY };
+    return;
+  }
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
 
@@ -1232,6 +1265,21 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
+  if (panDrag) {
+    state.panX = panDrag.panX + (e.offsetX - panDrag.x);
+    state.panY = panDrag.panY + (e.offsetY - panDrag.y);
+    render();
+    return;
+  }
+  // 마우스 호버(버튼 안 누른 상태): 브러시 고스트 위치 갱신
+  if (e.pointerType === 'mouse' && !pointers.has(e.pointerId)) {
+    const c = screenToCell(e.offsetX, e.offsetY);
+    if (!hoverCell || c.cx !== hoverCell.cx || c.cy !== hoverCell.cy) {
+      hoverCell = c;
+      render();
+    }
+    return;
+  }
   if (!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
 
@@ -1287,6 +1335,7 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 function endPointer(e) {
+  if (panDrag) { panDrag = null; return; }
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
   if (!drawing || pointers.size > 0) return;
@@ -1335,6 +1384,27 @@ function endPointer(e) {
 }
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
+
+canvas.addEventListener('pointerleave', (e) => {
+  if (e.pointerType === 'mouse' && hoverCell) {
+    hoverCell = null;
+    render();
+  }
+});
+
+// 데스크탑: 휠 = 커서 기준 줌 (트랙패드 핀치 포함)
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  const newZoom = Math.min(16, Math.max(0.2, state.zoom * factor));
+  const applied = newZoom / state.zoom;
+  state.zoom = newZoom;
+  state.panX = e.offsetX - (e.offsetX - state.panX) * applied;
+  state.panY = e.offsetY - (e.offsetY - state.panY) * applied;
+  render();
+}, { passive: false });
+// 가운데 버튼 자동 스크롤 방지
+canvas.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
 
 function cancelStroke() {
   if (!drawing) return;
@@ -1450,8 +1520,16 @@ function srcCellFromPoint(x, y) {
   };
 }
 
+let srcPanDrag = null;
+
 sourceCanvas.addEventListener('pointerdown', (e) => {
   if (!state.source) return;
+  if (e.pointerType === 'mouse' && e.button === 1) {
+    e.preventDefault();
+    sourceCanvas.setPointerCapture(e.pointerId);
+    srcPanDrag = { x: e.offsetX, y: e.offsetY, panX: srcView.panX, panY: srcView.panY };
+    return;
+  }
   sourceCanvas.setPointerCapture(e.pointerId);
   srcPointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
 
@@ -1475,6 +1553,12 @@ sourceCanvas.addEventListener('pointerdown', (e) => {
 });
 
 sourceCanvas.addEventListener('pointermove', (e) => {
+  if (srcPanDrag) {
+    srcView.panX = srcPanDrag.panX + (e.offsetX - srcPanDrag.x);
+    srcView.panY = srcPanDrag.panY + (e.offsetY - srcPanDrag.y);
+    renderSourcePanel();
+    return;
+  }
   if (!srcPointers.has(e.pointerId)) return;
   srcPointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
 
@@ -1503,6 +1587,7 @@ sourceCanvas.addEventListener('pointermove', (e) => {
 });
 
 function srcPointerEnd(e) {
+  if (srcPanDrag) { srcPanDrag = null; return; }
   srcPointers.delete(e.pointerId);
   if (srcPointers.size < 2) srcPinch = null;
   if (!srcDrag || !state.source || srcPointers.size > 0) return;
@@ -1519,7 +1604,8 @@ function srcPointerEnd(e) {
   srcDrag = null;
 }
 sourceCanvas.addEventListener('pointerup', srcPointerEnd);
-sourceCanvas.addEventListener('pointercancel', srcPointerEnd);
+sourceCanvas.addEventListener("pointercancel", srcPointerEnd);
+sourceCanvas.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); });
 
 // 데스크톱: 휠 = 커서 기준 줌
 sourceCanvas.addEventListener('wheel', (e) => {
