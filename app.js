@@ -2226,6 +2226,7 @@ $('btn-menu').addEventListener('click', () => {
   refreshSavedList();
 });
 $('project-name').addEventListener('click', () => $('btn-menu').click());
+$('btn-quicksave').addEventListener('click', () => saveProject(state.projectName));
 $('btn-assets').addEventListener('click', () => {
   $('asset-drawer').classList.remove('hidden');
 });
