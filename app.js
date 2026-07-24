@@ -2215,8 +2215,29 @@ document.querySelectorAll('.btn-close-drawer').forEach(b =>
 document.querySelectorAll('.drawer').forEach(d =>
   d.addEventListener('click', (e) => { if (e.target === d) closeDrawers(); }));
 
-$('btn-new').addEventListener('click', () => {
+async function nextProjectName() {
+  // 오늘 날짜 + 순번: 저장된 프로젝트·현재 이름과 겹치지 않는 다음 번호
+  const base = todayStamp();
+  let maxN = 0;
+  try {
+    const projects = (await dbReq('projects', 'readonly', s => s.getAll())) || [];
+    const pat = new RegExp('^' + base + '_(\\d+)$');
+    for (const p of projects) {
+      const n = p.name || '';
+      if (n === base) maxN = Math.max(maxN, 1);   // 구버전 날짜-단독 저장 이름 호환
+      const m = n.match(pat);
+      if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+    }
+    // 현재 문서 이름은 번호가 붙은 경우만 반영 (기본 날짜 이름은 제외)
+    const cur = (state.projectName || '').match(pat);
+    if (cur) maxN = Math.max(maxN, parseInt(cur[1], 10));
+  } catch (_) { /* 목록 조회 실패 시 _1 */ }
+  return `${base}_${maxN + 1}`;
+}
+
+$('btn-new').addEventListener('click', async () => {
   newDoc(32, 24);
+  state.projectName = await nextProjectName();
   updateSizeLabel();
   fitView();
   renderAll();
@@ -2224,7 +2245,7 @@ $('btn-new').addEventListener('click', () => {
   autosaveSoon();
 });
 $('btn-save').addEventListener('click', () => {
-  const name = $('save-name').value.trim() || todayStamp();
+  const name = $('save-name').value.trim() || state.projectName || todayStamp();
   saveProject(name);
 });
 
@@ -2325,6 +2346,7 @@ async function init() {
   } catch (_) { /* 무시 */ }
   restorePhysSize();
   const restored = await restoreAutosave();
+  if (!restored) state.projectName = await nextProjectName();
   if (!restored) {
     fitView();
     resizeCanvas();
