@@ -161,6 +161,14 @@
         <input id="save-name" type="text" placeholder="이름" autocomplete="off">
         <button id="btn-save" class="big">저장</button>
       </div>
+      <h3>실물 캔버스 맞춤</h3>
+      <div class="drawer-row">
+        <input id="phys-w" type="number" inputmode="decimal" min="1" placeholder="실물 가로 ㎜">
+        <input id="phys-h" type="number" inputmode="decimal" min="1" placeholder="실물 세로 ㎜">
+      </div>
+      <ul id="phys-list"></ul>
+      <p class="hint">실물 치수를 넣으면 비율에 맞는 타일 수 조합을 추천합니다.
+        아래로 갈수록 고해상도(1타일이 실물에서 작아짐) — 탭하면 캔버스 크기가 바뀝니다.</p>
       <h3>저장된 작업</h3>
       <ul id="saved-list"></ul>
       <h3>백업</h3>

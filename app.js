@@ -2192,6 +2192,79 @@ $('btn-save').addEventListener('click', () => {
   saveProject(name);
 });
 
+/* ===== 실물 캔버스 맞춤 (치수 → 비율 맞는 타일 수 추천) ===== */
+function physRecommend(pw, ph) {
+  const ratio = pw / ph;
+  const out = [];
+  let bracketEnd = 6;      // 세로 타일 수 구간 상한 (~1.45배 간격)
+  let best = null;
+  for (let h = 4; h <= MAX_GRID; h++) {
+    const w = Math.round(h * ratio);
+    if (w > MAX_GRID) break;
+    if (w >= 1) {
+      const err = Math.abs(w / h - ratio) / ratio;
+      if (err <= 0.02 && (!best || err < best.err)) best = { w, h, err };
+    }
+    if (h >= bracketEnd) {
+      if (best) out.push(best);
+      best = null;
+      bracketEnd = Math.ceil(bracketEnd * 1.45);
+    }
+  }
+  if (best) out.push(best);
+  return out.slice(0, 9);
+}
+
+function renderPhysList() {
+  const list = $('phys-list');
+  list.innerHTML = '';
+  const pw = parseFloat($('phys-w').value);
+  const ph = parseFloat($('phys-h').value);
+  if (!(pw > 0) || !(ph > 0)) return;
+  for (const r of physRecommend(pw, ph)) {
+    const li = document.createElement('li');
+    const btn = document.createElement('button');
+    btn.className = 'phys-item';
+    const mm = pw / r.w;
+    btn.textContent =
+      `${r.w}×${r.h} 타일 · 1타일≈${mm >= 10 ? Math.round(mm) : mm.toFixed(1)}㎜ · 오차 ${(r.err * 100).toFixed(r.err < 0.001 ? 2 : 1)}%`;
+    btn.addEventListener('click', () => {
+      resizeGrid(r.w, r.h);
+      fitView();
+      render();
+      closeDrawers();
+    });
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+}
+
+let physSaveTimer = null;
+function onPhysInput() {
+  renderPhysList();
+  clearTimeout(physSaveTimer);
+  physSaveTimer = setTimeout(() => {
+    dbReq('kv', 'readwrite', s => s.put({
+      key: 'physSize',
+      w: $('phys-w').value,
+      h: $('phys-h').value,
+    })).catch(() => {});
+  }, 400);
+}
+$('phys-w').addEventListener('input', onPhysInput);
+$('phys-h').addEventListener('input', onPhysInput);
+
+async function restorePhysSize() {
+  try {
+    const row = await dbReq('kv', 'readonly', s => s.get('physSize'));
+    if (row) {
+      $('phys-w').value = row.w || '';
+      $('phys-h').value = row.h || '';
+      renderPhysList();
+    }
+  } catch (_) { /* 무시 */ }
+}
+
 /* ===== 온라인/오프라인 표시 ===== */
 function updateOnline() { $('offline-badge').hidden = navigator.onLine; }
 window.addEventListener('online', updateOnline);
@@ -2214,6 +2287,7 @@ async function init() {
     const row = await dbReq('kv', 'readonly', s => s.get('masterPalette'));
     if (row && row.colors && row.colors.length >= 2) masterPalette = row.colors.slice();
   } catch (_) { /* 무시 */ }
+  restorePhysSize();
   const restored = await restoreAutosave();
   if (!restored) {
     fitView();
