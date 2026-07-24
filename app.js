@@ -1815,19 +1815,18 @@ $('export-ase').addEventListener('click', () => {
   exportAseprite();
 });
 
+function todayStamp() {
+  const d = new Date();
+  return `${d.getFullYear()}_${String(d.getMonth() + 1).padStart(2, '0')}_${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function exportPNG() {
+  // 1배 원본 해상도 (1픽셀 = 1도트), 파일명은 오늘 날짜
   commitFloating();
   renderDoc();
-  const SCALE = 4;
-  const out = document.createElement('canvas');
-  out.width = docCanvas.width * SCALE;
-  out.height = docCanvas.height * SCALE;
-  const octx = out.getContext('2d');
-  octx.imageSmoothingEnabled = false;
-  octx.drawImage(docCanvas, 0, 0, out.width, out.height);
   const a = document.createElement('a');
-  a.href = out.toDataURL('image/png');
-  a.download = (state.projectName || 'glitch-tile') + '.png';
+  a.href = docCanvas.toDataURL('image/png');
+  a.download = todayStamp() + '.png';
   document.body.appendChild(a);
   a.click();
   a.remove();
