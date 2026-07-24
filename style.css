@@ -245,6 +245,22 @@ button.tool:active { opacity: 0.7; }
   background: var(--panel);
   border-top: 1px solid #16161e;
 }
+#source-resize-handle {
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+  cursor: ns-resize;
+}
+#source-resize-handle .grip {
+  width: 64px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--panel2);
+}
+#source-resize-handle.active .grip { background: var(--accent); }
+#source-panel.collapsed #source-resize-handle { display: none; }
 #source-header {
   display: flex;
   align-items: center;

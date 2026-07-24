@@ -603,8 +603,8 @@ function render() {
     ctx.setLineDash([]);
   }
 
-  // 마우스 호버: 브러시 고스트 / 셀 하이라이트 (데스크탑)
-  if (hoverCell && !drawing) {
+  // 브러시 고스트: 마우스 호버 또는 터치 스탬프 미리보기
+  if (hoverCell && (!drawing || touchPreview)) {
     const hc = hoverCell;
     if ((state.tool === 'stamp' || state.tool === 'pattern') && state.brush) {
       const b = state.brush;
@@ -1210,6 +1210,7 @@ let patternStart = null;   // 패턴 채우기 드래그 시작 셀
 let patternRect = null;    // 패턴 채우기 미리보기 영역
 let panDrag = null;        // 마우스 가운데 버튼 팬 {x, y, panX, panY}
 let hoverCell = null;      // 마우스 호버 셀 (브러시 고스트 표시용)
+let touchPreview = false;  // 터치 스탬프: 누르는 동안 반투명 미리보기, 떼면 확정
 
 canvas.addEventListener('pointerdown', (e) => {
   if (!exportMenu.hidden) exportMenu.hidden = true;   // 캔버스 터치 시 내보내기 창 닫기
@@ -1246,6 +1247,13 @@ canvas.addEventListener('pointerdown', (e) => {
 
   switch (state.tool) {
     case 'stamp':
+      if (e.pointerType !== 'mouse' && state.brush) {
+        // 터치/펜슬: 누르는 동안 반투명 미리보기, 떼면 확정
+        touchPreview = true;
+        hoverCell = { cx, cy };
+        render();
+        break;
+      }
       pushUndo(); undoPushed = true;
       stampAt(cx, cy);
       lastCell = { cx, cy };
@@ -1333,6 +1341,14 @@ canvas.addEventListener('pointermove', (e) => {
 
   switch (state.tool) {
     case 'stamp':
+      if (touchPreview) {
+        if (!hoverCell || cx !== hoverCell.cx || cy !== hoverCell.cy) {
+          hoverCell = { cx, cy };
+          render();
+        }
+        break;
+      }
+      /* fallthrough */
     case 'eraser':
     case 'scatter': {
       if (lastCell && cx === lastCell.cx && cy === lastCell.cy) return;
@@ -1379,6 +1395,16 @@ function endPointer(e) {
   }
   shiftState.active = false;
   shiftState.snap = null;
+
+  if (touchPreview) {
+    if (hoverCell) {
+      pushUndo();
+      stampAt(hoverCell.cx, hoverCell.cy);
+    }
+    touchPreview = false;
+    hoverCell = null;
+    renderAll();
+  }
 
   if (state.tool === 'pattern' && patternStart) {
     // 드래그 영역을 브러시 블록으로 반복 타일링
@@ -1452,6 +1478,8 @@ function cancelStroke() {
   floatDrag = null;
   patternStart = null;
   patternRect = null;
+  touchPreview = false;
+  hoverCell = null;
   drawing = false;
   lastCell = null;
   renderAll();
@@ -1652,6 +1680,50 @@ sourceCanvas.addEventListener('wheel', (e) => {
   srcView.panY = e.offsetY - (e.offsetY - srcView.panY) * applied;
   renderSourcePanel();
 }, { passive: false });
+
+const srcHandle = $('source-resize-handle');
+let srcResize = null;      // {startY, startH}
+let srcResizeRaf = false;
+
+srcHandle.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  srcHandle.setPointerCapture(e.pointerId);
+  srcResize = { startY: e.clientY, startH: $('source-body').getBoundingClientRect().height };
+  srcHandle.classList.add('active');
+});
+srcHandle.addEventListener('pointermove', (e) => {
+  if (!srcResize) return;
+  const h = Math.min(window.innerHeight * 0.6,
+    Math.max(120, srcResize.startH + (srcResize.startY - e.clientY)));
+  $('source-body').style.height = h + 'px';
+  if (!srcResizeRaf) {
+    srcResizeRaf = true;
+    requestAnimationFrame(() => {
+      srcResizeRaf = false;
+      resizeSourceCanvas();   // 캔버스 영역이 실시간으로 재배분됨
+      resizeCanvas();
+    });
+  }
+});
+function endSrcResize() {
+  if (!srcResize) return;
+  srcResize = null;
+  srcHandle.classList.remove('active');
+  resizeSourceCanvas();
+  resizeCanvas();
+  dbReq('kv', 'readwrite', s =>
+    s.put({ key: 'srcPanelH', h: Math.round($('source-body').getBoundingClientRect().height) })
+  ).catch(() => {});
+}
+srcHandle.addEventListener('pointerup', endSrcResize);
+srcHandle.addEventListener('pointercancel', endSrcResize);
+
+async function restoreSrcPanelH() {
+  try {
+    const row = await dbReq('kv', 'readonly', s => s.get('srcPanelH'));
+    if (row && row.h >= 120) $('source-body').style.height = row.h + 'px';
+  } catch (_) { /* 무시 */ }
+}
 
 $('btn-source-fit').addEventListener('click', () => {
   fitSourceView();
@@ -2370,6 +2442,7 @@ async function init() {
     if (row && row.colors && row.colors.length >= 2) masterPalette = row.colors.slice();
   } catch (_) { /* 무시 */ }
   restorePhysSize();
+  await restoreSrcPanelH();
   const restored = await restoreAutosave();
   if (!restored) {
     state.projectName = await nextProjectName();
