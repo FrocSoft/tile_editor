@@ -20,6 +20,7 @@
   <header id="topbar">
     <div class="group">
       <button id="btn-menu" class="tool" title="프로젝트">☰</button>
+      <span id="project-name" title="현재 캔버스"></span>
       <button id="btn-assets" class="tool" title="에셋">🗂</button>
       <button id="btn-undo" class="tool" title="실행 취소">↩︎</button>
       <button id="btn-redo" class="tool" title="다시 실행">↪︎</button>
@@ -155,6 +156,7 @@
   <div id="project-drawer" class="drawer hidden">
     <div class="drawer-panel">
       <h2>프로젝트</h2>
+      <p class="hint" id="current-info"></p>
       <div class="drawer-row">
         <button id="btn-new" class="big">새 캔버스</button>
       </div>
