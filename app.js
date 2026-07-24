@@ -34,6 +34,7 @@ const state = {
   redoStack: [],
   projectName: todayStamp(),   // 새 프로젝트 기본 이름 = 오늘 날짜
   projectId: null,
+  dirty: false,                // 마지막 저장/불러오기 이후 변경 여부
   nes: null,               // NES 팔레트 상태 (init에서 defaultNesState로 채움)
 };
 
@@ -2060,6 +2061,8 @@ function loadDoc(doc) {
       renderBrushPreview();
       updateSelectionBar();
       updateSizeLabel();
+      state.dirty = false;
+      updateProjectLabel();
       fitView();
       renderAll();
       resolve();
@@ -2069,8 +2072,19 @@ function loadDoc(doc) {
   });
 }
 
+function updateProjectLabel() {
+  const status = state.projectId == null
+    ? '저장 안 됨'
+    : (state.dirty ? '변경됨' : '저장됨');
+  $('project-name').textContent = `${state.projectName} · ${status}`;
+  const info = $('current-info');
+  if (info) info.textContent = `현재 캔버스: ${state.projectName} · ${state.gridW}×${state.gridH} · ${status}`;
+}
+
 let autosaveTimer = null;
 function autosaveSoon() {
+  state.dirty = true;
+  updateProjectLabel();
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(() => {
     try {
@@ -2098,6 +2112,8 @@ async function saveProject(name) {
   state.projectId = id;
   state.projectName = name;
   autosaveSoon();
+  state.dirty = false;   // 방금 저장했으므로 (autosaveSoon이 세운 플래그 해제)
+  updateProjectLabel();
   refreshSavedList();
 }
 
@@ -2117,9 +2133,10 @@ async function refreshSavedList() {
     thumb.style.objectFit = 'contain';
     thumb.style.imageRendering = 'pixelated';
 
+    if (p.id === state.projectId) li.classList.add('current');
     const name = document.createElement('span');
     name.className = 'name';
-    name.textContent = `${p.name} (${p.gridW}×${p.gridH})`;
+    name.textContent = `${p.id === state.projectId ? '● ' : ''}${p.name} (${p.gridW}×${p.gridH})`;
 
     const loadBtn = document.createElement('button');
     loadBtn.textContent = '열기';
@@ -2205,8 +2222,10 @@ function closeDrawers() {
 $('btn-menu').addEventListener('click', () => {
   $('project-drawer').classList.remove('hidden');
   $('save-name').value = state.projectName;
+  updateProjectLabel();
   refreshSavedList();
 });
+$('project-name').addEventListener('click', () => $('btn-menu').click());
 $('btn-assets').addEventListener('click', () => {
   $('asset-drawer').classList.remove('hidden');
 });
@@ -2236,8 +2255,13 @@ async function nextProjectName() {
 }
 
 $('btn-new').addEventListener('click', async () => {
+  const hasContent = state.bg.some(v => v >= 0) || state.sprite.some(v => v >= 0);
+  if (state.dirty && hasContent &&
+      !confirm('저장하지 않은 현재 캔버스를 버리고 새로 만들까요?')) return;
   newDoc(32, 24);
   state.projectName = await nextProjectName();
+  state.dirty = false;
+  updateProjectLabel();
   updateSizeLabel();
   fitView();
   renderAll();
@@ -2346,7 +2370,11 @@ async function init() {
   } catch (_) { /* 무시 */ }
   restorePhysSize();
   const restored = await restoreAutosave();
-  if (!restored) state.projectName = await nextProjectName();
+  if (!restored) {
+    state.projectName = await nextProjectName();
+    state.dirty = false;
+  }
+  updateProjectLabel();
   if (!restored) {
     fitView();
     resizeCanvas();

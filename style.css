@@ -48,6 +48,16 @@ html, body {
 .group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 #zoom-label { font-size: 13px; opacity: 0.6; min-width: 44px; text-align: right; }
+#project-name {
+  font-size: 13px;
+  opacity: 0.85;
+  max-width: 24vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#current-info { font-size: 13px; opacity: 0.85; }
+#saved-list li.current { outline: 2px solid var(--accent); }
 #size-value { font-size: 13px; opacity: 0.8; min-width: 48px; }
 .size-label { font-size: 12px; opacity: 0.6; }
 
