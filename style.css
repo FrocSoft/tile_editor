@@ -349,6 +349,32 @@ button.big, .file-label {
   white-space: nowrap;
 }
 
+/* 실물 캔버스 맞춤 */
+.drawer-row input[type="number"] {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  border-radius: 10px;
+  border: 1px solid var(--panel2);
+  background: var(--bg);
+  color: var(--fg);
+  padding: 0 12px;
+  font-size: 16px;
+}
+#phys-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.phys-item {
+  width: 100%;
+  min-height: 44px;
+  border: none;
+  border-radius: 10px;
+  background: var(--panel2);
+  color: var(--fg);
+  font-size: 14px;
+  text-align: left;
+  padding: 0 12px;
+}
+.phys-item:active { background: var(--accent); color: #1a1b26; }
+
 /* 저장 목록 */
 #saved-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
 #saved-list li {
