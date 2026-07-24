@@ -32,7 +32,7 @@ const state = {
   panY: 0,
   undoStack: [],
   redoStack: [],
-  projectName: '무제',
+  projectName: todayStamp(),   // 새 프로젝트 기본 이름 = 오늘 날짜
   projectId: null,
   nes: null,               // NES 팔레트 상태 (init에서 defaultNesState로 채움)
 };
@@ -410,7 +410,7 @@ function newDoc(w, h) {
   state.redoStack = [];
   state.sel = null;
   state.floating = null;
-  state.projectName = '무제';
+  state.projectName = todayStamp();
   state.projectId = null;
 }
 
@@ -1826,7 +1826,7 @@ function exportPNG() {
   renderDoc();
   const a = document.createElement('a');
   a.href = docCanvas.toDataURL('image/png');
-  a.download = todayStamp() + '.png';
+  a.download = (state.projectName || todayStamp()) + '.png';
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -2043,7 +2043,7 @@ function loadDoc(doc) {
       state.gridH = doc.gridH;
       state.bg = Int32Array.from(doc.bg);
       state.sprite = Int32Array.from(doc.sprite);
-      state.projectName = doc.name || '무제';
+      state.projectName = doc.name || todayStamp();
       state.undoStack = [];
       state.redoStack = [];
       state.sel = null;
@@ -2224,7 +2224,7 @@ $('btn-new').addEventListener('click', () => {
   autosaveSoon();
 });
 $('btn-save').addEventListener('click', () => {
-  const name = $('save-name').value.trim() || '무제';
+  const name = $('save-name').value.trim() || todayStamp();
   saveProject(name);
 });
 
