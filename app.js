@@ -19,6 +19,7 @@ const state = {
   sprite: null,
   activeLayer: 'sprite',
   visible: { bg: true, sprite: true },
+  linkLayers: false,       // 🔗 선택/이동을 두 레이어에 동시 적용
   tool: 'stamp',
   brush: null,            // {w, h, cells: Int32Array}
   source: null,           // {name, w, h, cells: Int32Array}
@@ -768,29 +769,45 @@ function inRect(cx, cy, r) {
   return r && cx >= r.x && cy >= r.y && cx < r.x + r.w && cy < r.y + r.h;
 }
 
-function buildFloatCanvas(cells, w, h) {
+function layerCellsOf(name) {
+  return name === 'bg' ? state.bg : state.sprite;
+}
+
+function selLayers() {
+  // 🔗 레이어 연동이 켜져 있으면 두 레이어를 함께 선택/이동
+  return state.linkLayers ? ['bg', 'sprite'] : [state.activeLayer];
+}
+
+function buildFloatCanvas(layers, w, h) {
   const fc = document.createElement('canvas');
   fc.width = w * TILE; fc.height = h * TILE;
   const fctx = fc.getContext('2d');
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) drawTile(fctx, cells[y * w + x], x * TILE, y * TILE);
+  for (const name of ['bg', 'sprite']) {   // BG 아래, 스프라이트 위 순서로 합성
+    const cells = layers[name];
+    if (!cells) continue;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) drawTile(fctx, cells[y * w + x], x * TILE, y * TILE);
+    }
   }
   return fc;
 }
 
 function liftSelection() {
-  // 선택 영역을 활성 레이어에서 들어 올려 플로팅으로 전환
+  // 선택 영역을 레이어에서 들어 올려 플로팅으로 전환
   const s = state.sel;
   if (!s) return;
   pushUndo();
-  const cells = activeCells();
-  const lifted = rectCells(s, cells);
-  for (let y = 0; y < s.h; y++) {
-    for (let x = 0; x < s.w; x++) cells[(s.y + y) * state.gridW + (s.x + x)] = -1;
+  const lifted = {};
+  for (const name of selLayers()) {
+    const cells = layerCellsOf(name);
+    lifted[name] = rectCells(s, cells);
+    for (let y = 0; y < s.h; y++) {
+      for (let x = 0; x < s.w; x++) cells[(s.y + y) * state.gridW + (s.x + x)] = -1;
+    }
   }
   state.floating = {
     x: s.x, y: s.y, w: s.w, h: s.h,
-    cells: lifted, canvas: buildFloatCanvas(lifted, s.w, s.h),
+    layers: lifted, canvas: buildFloatCanvas(lifted, s.w, s.h),
   };
   state.sel = null;
   renderAll();
@@ -801,10 +818,11 @@ function duplicateSelection() {
   const s = state.sel;
   if (!s) return;
   pushUndo();
-  const copied = rectCells(s, activeCells());
+  const copied = {};
+  for (const name of selLayers()) copied[name] = rectCells(s, layerCellsOf(name));
   state.floating = {
     x: s.x, y: s.y, w: s.w, h: s.h,
-    cells: copied, canvas: buildFloatCanvas(copied, s.w, s.h),
+    layers: copied, canvas: buildFloatCanvas(copied, s.w, s.h),
   };
   state.sel = null;
   renderAll();
@@ -815,31 +833,29 @@ function stampFloatingInPlace() {
   const f = state.floating;
   if (!f) return;
   pushUndo();
-  const cells = activeCells();
-  for (let y = 0; y < f.h; y++) {
-    for (let x = 0; x < f.w; x++) {
-      const t = f.cells[y * f.w + x];
-      if (t < 0) continue;
-      const gx = f.x + x, gy = f.y + y;
-      if (inGrid(gx, gy)) cells[gy * state.gridW + gx] = t;
-    }
-  }
+  writeFloating(f);
   renderAll();
   autosaveSoon();
+}
+
+function writeFloating(f) {
+  for (const [name, src] of Object.entries(f.layers)) {
+    const cells = layerCellsOf(name);
+    for (let y = 0; y < f.h; y++) {
+      for (let x = 0; x < f.w; x++) {
+        const t = src[y * f.w + x];
+        if (t < 0) continue;
+        const gx = f.x + x, gy = f.y + y;
+        if (inGrid(gx, gy)) cells[gy * state.gridW + gx] = t;
+      }
+    }
+  }
 }
 
 function commitFloating() {
   const f = state.floating;
   if (!f) return;
-  const cells = activeCells();
-  for (let y = 0; y < f.h; y++) {
-    for (let x = 0; x < f.w; x++) {
-      const t = f.cells[y * f.w + x];
-      if (t < 0) continue;
-      const gx = f.x + x, gy = f.y + y;
-      if (inGrid(gx, gy)) cells[gy * state.gridW + gx] = t;
-    }
-  }
+  writeFloating(f);
   state.floating = null;
   updateSelectionBar();
   renderAll();
@@ -870,9 +886,11 @@ $('sel-delete').addEventListener('click', () => {
   } else if (state.sel) {
     pushUndo();
     const s = state.sel;
-    const cells = activeCells();
-    for (let y = 0; y < s.h; y++) {
-      for (let x = 0; x < s.w; x++) cells[(s.y + y) * state.gridW + (s.x + x)] = -1;
+    for (const name of selLayers()) {
+      const cells = layerCellsOf(name);
+      for (let y = 0; y < s.h; y++) {
+        for (let x = 0; x < s.w; x++) cells[(s.y + y) * state.gridW + (s.x + x)] = -1;
+      }
     }
     state.sel = null;
   }
@@ -882,12 +900,25 @@ $('sel-delete').addEventListener('click', () => {
 });
 
 $('sel-brush').addEventListener('click', () => {
+  // 브러시화: 연동 시 스프라이트가 배경을 덮는 합성 결과를 사용
+  const compose = (layers, w, h) => {
+    const bg = layers.bg, spr = layers.sprite;
+    const out = new Int32Array(w * h).fill(-1);
+    for (let i = 0; i < out.length; i++) {
+      out[i] = spr && spr[i] >= 0 ? spr[i] : (bg ? bg[i] : (spr ? spr[i] : -1));
+    }
+    return out;
+  };
   let picked = null;
   if (state.floating) {
-    picked = { w: state.floating.w, h: state.floating.h, cells: state.floating.cells };
+    const f = state.floating;
+    picked = { w: f.w, h: f.h, cells: compose(f.layers, f.w, f.h) };
     commitFloating();
   } else if (state.sel) {
-    picked = { w: state.sel.w, h: state.sel.h, cells: rectCells(state.sel, activeCells()) };
+    const s = state.sel;
+    const layers = {};
+    for (const name of selLayers()) layers[name] = rectCells(s, layerCellsOf(name));
+    picked = { w: s.w, h: s.h, cells: compose(layers, s.w, s.h) };
     state.sel = null;
   }
   if (picked) {
@@ -1750,6 +1781,12 @@ function toggleVis(layer, btn) {
 }
 $('vis-bg').addEventListener('click', (e) => toggleVis('bg', e.currentTarget));
 $('vis-sprite').addEventListener('click', (e) => toggleVis('sprite', e.currentTarget));
+
+$('layer-link').addEventListener('click', (e) => {
+  clearSelection();   // 연동 상태가 바뀌면 진행 중인 선택은 확정
+  state.linkLayers = !state.linkLayers;
+  e.currentTarget.classList.toggle('active', state.linkLayers);
+});
 
 $('w-minus').addEventListener('click', () => resizeGrid(state.gridW - 1, state.gridH));
 $('w-plus').addEventListener('click', () => resizeGrid(state.gridW + 1, state.gridH));
