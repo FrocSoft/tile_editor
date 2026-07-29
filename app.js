@@ -938,6 +938,25 @@ $('sel-dup').addEventListener('click', () => {
   updateSelectionBar();
 });
 
+// "연속" 버튼: 다른 손으로 누르고 있는 동안만 터치 스탬프가 연속 모드가 된다
+{
+  const holdBtn = $('btn-stamp-hold');
+  const holdOff = () => {
+    stampContinuous = false;
+    holdBtn.classList.remove('held');
+  };
+  holdBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    try { holdBtn.setPointerCapture(e.pointerId); } catch (_) {}
+    stampContinuous = true;
+    holdBtn.classList.add('held');
+  });
+  holdBtn.addEventListener('pointerup', holdOff);
+  holdBtn.addEventListener('pointercancel', holdOff);
+  holdBtn.addEventListener('lostpointercapture', holdOff);
+  holdBtn.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
 $('brush-rot').addEventListener('click', () => transformBrush('rot90'));
 $('brush-fliph').addEventListener('click', () => transformBrush('flipH'));
 $('brush-flipv').addEventListener('click', () => transformBrush('flipV'));
@@ -1211,6 +1230,7 @@ let patternRect = null;    // 패턴 채우기 미리보기 영역
 let panDrag = null;        // 마우스 가운데 버튼 팬 {x, y, panX, panY}
 let hoverCell = null;      // 마우스 호버 셀 (브러시 고스트 표시용)
 let touchPreview = false;  // 터치 스탬프: 누르는 동안 반투명 미리보기, 떼면 확정
+let stampContinuous = false;   // "연속" 버튼을 누르고 있는 동안 true — 터치도 즉시 찍고 드래그로 연속
 
 canvas.addEventListener('pointerdown', (e) => {
   if (!exportMenu.hidden) exportMenu.hidden = true;   // 캔버스 터치 시 내보내기 창 닫기
@@ -1247,8 +1267,8 @@ canvas.addEventListener('pointerdown', (e) => {
 
   switch (state.tool) {
     case 'stamp':
-      if (e.pointerType !== 'mouse' && state.brush) {
-        // 터치/펜슬: 누르는 동안 반투명 미리보기, 떼면 확정
+      if (e.pointerType !== 'mouse' && state.brush && !stampContinuous) {
+        // 터치/펜슬 미리보기 모드: 누르는 동안 반투명, 떼면 확정
         touchPreview = true;
         hoverCell = { cx, cy };
         render();
