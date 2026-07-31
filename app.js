@@ -938,22 +938,33 @@ $('sel-dup').addEventListener('click', () => {
   updateSelectionBar();
 });
 
-// "연속" 버튼: 다른 손으로 누르고 있는 동안만 터치 스탬프가 연속 모드가 된다
+// "연속" 버튼: 다른 손으로 누르고 있는 동안만 터치 스탬프가 연속 모드가 된다.
+// 포인터 캡처는 iOS WebKit이 다른 손가락의 이벤트까지 캡처 요소로 라우팅해
+// 캔버스가 pointerdown을 못 받게 되므로 쓰지 않는다 — 터치는 touch 이벤트로 추적.
 {
   const holdBtn = $('btn-stamp-hold');
-  const holdOff = () => {
-    stampContinuous = false;
-    holdBtn.classList.remove('held');
+  let holdTouch = false, holdMouse = false;
+  const sync = () => {
+    stampContinuous = holdTouch || holdMouse;
+    holdBtn.classList.toggle('held', stampContinuous);
   };
-  holdBtn.addEventListener('pointerdown', (e) => {
+  holdBtn.addEventListener('touchstart', (e) => {
     e.preventDefault();
-    try { holdBtn.setPointerCapture(e.pointerId); } catch (_) {}
-    stampContinuous = true;
-    holdBtn.classList.add('held');
+    holdTouch = true;
+    sync();
+  }, { passive: false });
+  const touchEnd = (e) => {
+    if (e.targetTouches.length === 0) { holdTouch = false; sync(); }
+  };
+  holdBtn.addEventListener('touchend', touchEnd);
+  holdBtn.addEventListener('touchcancel', touchEnd);
+  // 데스크탑 마우스: 버튼 밖에서 떼도 window에서 해제
+  holdBtn.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse') { e.preventDefault(); holdMouse = true; sync(); }
   });
-  holdBtn.addEventListener('pointerup', holdOff);
-  holdBtn.addEventListener('pointercancel', holdOff);
-  holdBtn.addEventListener('lostpointercapture', holdOff);
+  window.addEventListener('pointerup', (e) => {
+    if (holdMouse && e.pointerType === 'mouse') { holdMouse = false; sync(); }
+  });
   holdBtn.addEventListener('contextmenu', (e) => e.preventDefault());
 }
 
