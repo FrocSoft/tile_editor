@@ -938,34 +938,23 @@ $('sel-dup').addEventListener('click', () => {
   updateSelectionBar();
 });
 
-// "연속" 버튼: 다른 손으로 누르고 있는 동안만 터치 스탬프가 연속 모드가 된다.
-// 포인터 캡처는 iOS WebKit이 다른 손가락의 이벤트까지 캡처 요소로 라우팅해
-// 캔버스가 pointerdown을 못 받게 되므로 쓰지 않는다 — 터치는 touch 이벤트로 추적.
-{
-  const holdBtn = $('btn-stamp-hold');
-  let holdTouch = false, holdMouse = false;
-  const sync = () => {
-    stampContinuous = holdTouch || holdMouse;
-    holdBtn.classList.toggle('held', stampContinuous);
-  };
-  holdBtn.addEventListener('touchstart', (e) => {
-    e.preventDefault();
-    holdTouch = true;
-    sync();
-  }, { passive: false });
-  const touchEnd = (e) => {
-    if (e.targetTouches.length === 0) { holdTouch = false; sync(); }
-  };
-  holdBtn.addEventListener('touchend', touchEnd);
-  holdBtn.addEventListener('touchcancel', touchEnd);
-  // 데스크탑 마우스: 버튼 밖에서 떼도 window에서 해제
-  holdBtn.addEventListener('pointerdown', (e) => {
-    if (e.pointerType === 'mouse') { e.preventDefault(); holdMouse = true; sync(); }
-  });
-  window.addEventListener('pointerup', (e) => {
-    if (holdMouse && e.pointerType === 'mouse') { holdMouse = false; sync(); }
-  });
-  holdBtn.addEventListener('contextmenu', (e) => e.preventDefault());
+// "연속" 토글: 켜면 터치 스탬프가 미리보기에서 잠깐(DWELL_MS) 멈출 때
+// 첫 타일이 확정되고, 그때부터 드래그로 연속 칠하기가 된다.
+// (동시 두 손 터치는 iOS 사파리에서 신뢰할 수 없어 토글+멈춤 방식을 쓴다)
+$('btn-stamp-mode').addEventListener('click', (e) => {
+  stampContinuous = !stampContinuous;
+  e.currentTarget.classList.toggle('active', stampContinuous);
+  dbReq('kv', 'readwrite', s => s.put({ key: 'stampMode', continuous: stampContinuous })).catch(() => {});
+});
+
+async function restoreStampMode() {
+  try {
+    const row = await dbReq('kv', 'readonly', s => s.get('stampMode'));
+    if (row) {
+      stampContinuous = !!row.continuous;
+      $('btn-stamp-mode').classList.toggle('active', stampContinuous);
+    }
+  } catch (_) { /* 무시 */ }
 }
 
 $('brush-rot').addEventListener('click', () => transformBrush('rot90'));
@@ -1241,7 +1230,24 @@ let patternRect = null;    // 패턴 채우기 미리보기 영역
 let panDrag = null;        // 마우스 가운데 버튼 팬 {x, y, panX, panY}
 let hoverCell = null;      // 마우스 호버 셀 (브러시 고스트 표시용)
 let touchPreview = false;  // 터치 스탬프: 누르는 동안 반투명 미리보기, 떼면 확정
-let stampContinuous = false;   // "연속" 버튼을 누르고 있는 동안 true — 터치도 즉시 찍고 드래그로 연속
+let stampContinuous = false;   // "연속" 토글 상태 — 미리보기에서 멈추면 확정 후 드래그 연속
+let dwellTimer = null;         // 연속 모드: 같은 칸에 DWELL_MS 머무르면 확정
+const DWELL_MS = 300;
+
+// 연속 모드에서 미리보기 → 잠깐 멈추면 첫 타일을 확정하고 연속 칠하기로 전환
+function armDwell() {
+  clearTimeout(dwellTimer);
+  dwellTimer = setTimeout(() => {
+    if (!drawing || !touchPreview || !hoverCell) return;
+    if (state.tool !== 'stamp' || !state.brush) return;
+    pushUndo(); undoPushed = true;
+    stampAt(hoverCell.cx, hoverCell.cy);
+    lastCell = { cx: hoverCell.cx, cy: hoverCell.cy };
+    touchPreview = false;
+    hoverCell = null;
+    renderAll();
+  }, DWELL_MS);
+}
 
 canvas.addEventListener('pointerdown', (e) => {
   if (!exportMenu.hidden) exportMenu.hidden = true;   // 캔버스 터치 시 내보내기 창 닫기
@@ -1278,10 +1284,12 @@ canvas.addEventListener('pointerdown', (e) => {
 
   switch (state.tool) {
     case 'stamp':
-      if (e.pointerType !== 'mouse' && state.brush && !stampContinuous) {
-        // 터치/펜슬 미리보기 모드: 누르는 동안 반투명, 떼면 확정
+      if (e.pointerType !== 'mouse' && state.brush) {
+        // 터치/펜슬: 누르는 동안 반투명 미리보기, 떼면 확정.
+        // 연속 모드면 같은 칸에 잠깐 멈출 때 확정하고 드래그 연속으로 전환.
         touchPreview = true;
         hoverCell = { cx, cy };
+        if (stampContinuous) armDwell();
         render();
         break;
       }
@@ -1375,6 +1383,7 @@ canvas.addEventListener('pointermove', (e) => {
       if (touchPreview) {
         if (!hoverCell || cx !== hoverCell.cx || cy !== hoverCell.cy) {
           hoverCell = { cx, cy };
+          if (stampContinuous) armDwell();   // 칸이 바뀌면 멈춤 타이머 재시작
           render();
         }
         break;
@@ -1419,6 +1428,7 @@ function endPointer(e) {
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
   if (!drawing || pointers.size > 0) return;
+  clearTimeout(dwellTimer);
 
   if (state.tool === 'shift' && shiftState.active && !shiftState.axis && undoPushed) {
     state.undoStack.pop();   // 움직임 없던 시프트는 undo 항목 제거
@@ -1498,6 +1508,7 @@ canvas.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefau
 
 function cancelStroke() {
   if (!drawing) return;
+  clearTimeout(dwellTimer);
   if (undoPushed) {
     // 한 손가락으로 긋다가 두 손가락 제스처로 전환: 방금 획을 되돌림
     restore(state.undoStack.pop());
@@ -2473,6 +2484,7 @@ async function init() {
     if (row && row.colors && row.colors.length >= 2) masterPalette = row.colors.slice();
   } catch (_) { /* 무시 */ }
   restorePhysSize();
+  restoreStampMode();
   await restoreSrcPanelH();
   const restored = await restoreAutosave();
   if (!restored) {
