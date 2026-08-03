@@ -11,6 +11,22 @@ const ATLAS_COLS = 16;    // 아틀라스 한 행의 타일 수
 const MAX_UNDO = 100;
 const MIN_GRID = 1, MAX_GRID = 256;
 
+/* ===== 프로젝트 이름 규칙: "SCR XXDD" (XX=랜덤, DD=날짜 코드) ===== */
+const B36 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+// 만든 날짜(1~366일째)를 36진수 두 자리로 — 본인만 역산할 수 있는 날짜 코드
+function dayCode() {
+  const d = new Date();
+  const doy = Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())
+                        - Date.UTC(d.getFullYear(), 0, 0)) / 86400000);
+  return B36[Math.floor(doy / 36)] + B36[doy % 36];
+}
+
+function randScrName() {
+  const r = () => B36[Math.floor(Math.random() * 36)];
+  return `SCR ${r()}${r()}${dayCode()}`;
+}
+
 /* ===== 상태 ===== */
 const state = {
   gridW: 32,
@@ -32,7 +48,7 @@ const state = {
   panY: 0,
   undoStack: [],
   redoStack: [],
-  projectName: todayStamp(),   // 새 프로젝트 기본 이름 = 오늘 날짜
+  projectName: randScrName(),  // 새 프로젝트 기본 이름 = SCR XXDD (랜덤2 + 날짜코드2)
   projectId: null,
   dirty: false,                // 마지막 저장/불러오기 이후 변경 여부
   nes: null,               // NES 팔레트 상태 (init에서 defaultNesState로 채움)
@@ -411,7 +427,7 @@ function newDoc(w, h) {
   state.redoStack = [];
   state.sel = null;
   state.floating = null;
-  state.projectName = todayStamp();
+  state.projectName = randScrName();
   state.projectId = null;
 }
 
@@ -2350,23 +2366,18 @@ document.querySelectorAll('.drawer').forEach(d =>
   d.addEventListener('click', (e) => { if (e.target === d) closeDrawers(); }));
 
 async function nextProjectName() {
-  // 오늘 날짜 + 순번: 저장된 프로젝트·현재 이름과 겹치지 않는 다음 번호
-  const base = todayStamp();
-  let maxN = 0;
+  // "SCR XXDD": 앞 두 자리 랜덤, 뒤 두 자리는 만든 날짜(1~366일째)의 36진수.
+  // 저장된 프로젝트·현재 이름과 겹치면 앞 두 자리를 다시 뽑는다.
+  const taken = new Set([state.projectName]);
   try {
     const projects = (await dbReq('projects', 'readonly', s => s.getAll())) || [];
-    const pat = new RegExp('^' + base + '_(\\d+)$');
-    for (const p of projects) {
-      const n = p.name || '';
-      if (n === base) maxN = Math.max(maxN, 1);   // 구버전 날짜-단독 저장 이름 호환
-      const m = n.match(pat);
-      if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
-    }
-    // 현재 문서 이름은 번호가 붙은 경우만 반영 (기본 날짜 이름은 제외)
-    const cur = (state.projectName || '').match(pat);
-    if (cur) maxN = Math.max(maxN, parseInt(cur[1], 10));
-  } catch (_) { /* 목록 조회 실패 시 _1 */ }
-  return `${base}_${maxN + 1}`;
+    for (const p of projects) taken.add(p.name);
+  } catch (_) { /* 목록 조회 실패 시 중복 검사 생략 */ }
+  for (let i = 0; i < 100; i++) {
+    const n = randScrName();
+    if (!taken.has(n)) return n;
+  }
+  return randScrName();
 }
 
 $('btn-new').addEventListener('click', async () => {
