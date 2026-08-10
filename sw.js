@@ -6,7 +6,7 @@
  * - CACHE_VERSION을 올리면 이전 캐시가 정리되고 새로 받는다
  */
 
-const CACHE_VERSION = 'v28';
+const CACHE_VERSION = 'v29';
 const CACHE_NAME = `glitch-tile-${CACHE_VERSION}`;
 
 const CORE = [
@@ -52,6 +52,21 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
+
+    // 에셋 목록만 network-first: 리포에 새로 올린 에셋이 다음 실행에 바로 보이도록
+    // (온라인일 때만 갱신되고, 실패하면 캐시본으로 폴백해 오프라인 동작은 그대로)
+    if (new URL(req.url).pathname.endsWith('/assets/index.json')) {
+      try {
+        const fresh = await fetch(req);
+        if (fresh && fresh.ok) {
+          cache.put(req, fresh.clone());
+          return fresh;
+        }
+      } catch (_) { /* 오프라인 → 캐시로 */ }
+      const cachedIndex = await cache.match(req, { ignoreSearch: true });
+      if (cachedIndex) return cachedIndex;
+    }
+
     const cached = await cache.match(req, { ignoreSearch: true });
     if (cached) {
       // 백그라운드 갱신 (온라인일 때만 성공)

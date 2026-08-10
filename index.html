@@ -151,7 +151,11 @@
         이미지 선택 (사진/파일)
         <input id="file-input" type="file" accept="image/*" hidden>
       </label>
-      <p class="hint">이미지는 8×8 픽셀 단위로 분절되어 타일 브러시가 됩니다. 리포의 assets/ 폴더에 PNG를 넣고 tools/build_asset_index.py를 실행하면 목록에 추가됩니다.</p>
+      <p class="hint">이미지는 8×8 픽셀 단위로 분절되어 타일 브러시가 됩니다.
+        위 목록에 영구히 추가하려면 사파리에서 github.com의 이 리포 → <b>assets/원하는 폴더</b> →
+        Add file → Upload files로 PNG를 올리고 Commit하세요. 1분쯤 뒤 자동 배포되며,
+        여러 장을 한 번에 올리면 빌드가 한 번만 돌아 더 빠릅니다.
+        새 폴더는 업로드 화면 위쪽 경로칸에 폴더 이름을 입력하면 만들어집니다.</p>
       <button class="big btn-close-drawer">닫기</button>
     </div>
   </div>
