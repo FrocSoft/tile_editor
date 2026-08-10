@@ -266,6 +266,7 @@ function defaultNesState() {
   ];
   return {
     backdrop: '#000000',
+    backdropFill: true,      // NES처럼 배경색을 모든 레이어 아래에 깔지 여부
     bgPals: presets.map(p => p.slice()),
     sprPals: presets.map(p => p.slice()),
     activePal: 0,
@@ -557,6 +558,11 @@ function renderDoc() {
   docCanvas.width = state.gridW * TILE;
   docCanvas.height = state.gridH * TILE;
   docCtx.imageSmoothingEnabled = false;
+  // NES의 backdrop: 모든 레이어 아래에 깔려 여백도 타일 속 빈 픽셀도 이 색이 된다
+  if (state.nes && state.nes.backdropFill) {
+    docCtx.fillStyle = state.nes.backdrop;
+    docCtx.fillRect(0, 0, docCanvas.width, docCanvas.height);
+  }
   const layers = [];
   if (state.visible.bg) layers.push(state.bg);
   if (state.visible.sprite) layers.push(state.sprite);
@@ -581,9 +587,11 @@ function render() {
   ctx.scale(v, v);
   ctx.imageSmoothingEnabled = false;
 
-  // 문서 배경 체커 (투명 표시)
-  ctx.fillStyle = getCheckerPattern();
-  ctx.fillRect(0, 0, W, H);
+  // 문서 배경 체커 (투명 표시) — 배경색 채우기가 켜져 있으면 불필요
+  if (!(state.nes && state.nes.backdropFill)) {
+    ctx.fillStyle = getCheckerPattern();
+    ctx.fillRect(0, 0, W, H);
+  }
   ctx.drawImage(docCanvas, 0, 0);
 
   // 이동 중인 플로팅 선택
@@ -1020,6 +1028,7 @@ function renderPaletteUI() {
   const backdrop = $('pal-backdrop');
   backdrop.style.background = state.nes.backdrop;
   backdrop.classList.toggle('selected', palSelectedSlot === 'backdrop');
+  $('pal-backdrop-fill').classList.toggle('active', !!state.nes.backdropFill);
   const slots = $('pal-slots');
   slots.innerHTML = '';
   currentSubpal().forEach((hex, i) => {
@@ -1061,6 +1070,8 @@ function renderMasterGrid() {
         swapTo = hex;
       } else if (palSelectedSlot === 'backdrop') {
         state.nes.backdrop = hex;
+        state.dirty = true;
+        renderAll();          // 배경색 채우기가 켜져 있으면 즉시 반영
         autosaveSoon();
       } else if (palSelectedSlot !== null) {
         currentSubpal()[palSelectedSlot] = hex;
@@ -1201,6 +1212,21 @@ $('pal-file').addEventListener('change', async (e) => {
   } catch (_) {
     alert('팔레트 파일을 여는 중 오류가 발생했습니다.');
   }
+});
+
+// 배경색 슬롯 선택 (고른 뒤 마스터 팔레트에서 색을 누르면 배경색이 바뀐다)
+$('pal-backdrop').addEventListener('click', () => {
+  palSelectedSlot = palSelectedSlot === 'backdrop' ? null : 'backdrop';
+  renderPaletteUI();
+});
+
+// 배경색 채우기 토글: 끄면 여백이 투명해져 투명 PNG로 내보낼 수 있다
+$('pal-backdrop-fill').addEventListener('click', () => {
+  state.nes.backdropFill = !state.nes.backdropFill;
+  state.dirty = true;
+  renderPaletteUI();
+  renderAll();
+  autosaveSoon();
 });
 
 $('pal-reset').addEventListener('click', () => setMasterPalette(NES_MASTER.slice()));
@@ -1986,6 +2012,17 @@ function layerToRGBA(cells) {
   return out;
 }
 
+// 단색 레이어(backdrop)용 RGBA 버퍼
+function solidRGBA(hex) {
+  const W = state.gridW * TILE, H = state.gridH * TILE;
+  const out = new Uint8ClampedArray(W * H * 4);
+  const [r, g, b] = hexToRGB(hex);
+  for (let i = 0; i < out.length; i += 4) {
+    out[i] = r; out[i + 1] = g; out[i + 2] = b; out[i + 3] = 255;
+  }
+  return out;
+}
+
 async function zlibDeflate(bytes) {
   if (typeof CompressionStream === 'undefined') return null;   // 미지원 → raw cel로 대체
   const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate'));
@@ -2021,10 +2058,14 @@ function aseWriter() {
 async function exportAseprite() {
   commitFloating();
   const W = state.gridW * TILE, H = state.gridH * TILE;
-  const layers = [
+  const layers = [];
+  if (state.nes.backdropFill) {
+    layers.push({ name: 'Backdrop', pixels: solidRGBA(state.nes.backdrop) });
+  }
+  layers.push(
     { name: 'Background', pixels: layerToRGBA(state.bg) },
     { name: 'Sprite', pixels: layerToRGBA(state.sprite) },
-  ];
+  );
   for (const l of layers) l.zlib = await zlibDeflate(l.pixels);
 
   // 청크들 먼저 조립
@@ -2167,7 +2208,8 @@ function loadDoc(doc) {
       tileTransformCache.clear();   // 아틀라스가 교체되었으므로 변환 캐시 무효화
       tileQuantCache.clear();
       tileSwapCache.clear();
-      if (doc.nes) state.nes = doc.nes;
+      // 옛 저장본에 없는 필드는 기본값으로 채운다 (예: backdropFill)
+      if (doc.nes) state.nes = { ...defaultNesState(), ...doc.nes };
       // 마스터 팔레트는 전역(kv 'masterPalette')으로만 관리 — 문서에 저장하지 않음
       if (!palettePanel.hidden) renderPaletteUI();
       state.gridW = doc.gridW;
