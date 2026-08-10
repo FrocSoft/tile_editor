@@ -51,6 +51,8 @@ BG/스프라이트 두 레이어에 찍으며 글리치 아트를 만든다.
 
 ## 에셋 추가하기
 
+에셋은 리포의 `assets/` 아래 폴더별로 둔다:
+
 ```
 assets/
   <폴더명>/
@@ -58,13 +60,24 @@ assets/
     sprite2.png
 ```
 
-PNG를 넣은 뒤 인덱스를 갱신하고 커밋한다:
+### 아이패드에서 (권장)
+
+사파리에서 github.com의 리포 → `assets/<폴더>` → **Add file → Upload files** →
+PNG를 여러 장 골라 **Commit changes**. GitHub Actions가 `index.json`을 다시 만들고
+배포하므로(1분쯤) 앱을 열면 🗂 목록에 나타나고, 이후에는 오프라인에서도 쓸 수 있다.
+새 폴더는 업로드 화면 위쪽 경로칸에 폴더 이름을 입력하면 만들어진다.
+여러 장을 한 커밋에 올리면 Pages 빌드가 한 번만 돌아 시간당 빌드 제한을 피할 수 있다.
+
+타일 PNG는 색 수가 적어 장당 수십 KB 수준이라(현재 21개 합쳐 277 KB)
+Pages 사이트 1 GB 한도에는 사실상 걸리지 않는다.
+
+### 데스크탑에서
+
+PNG를 넣은 뒤 인덱스를 갱신하고 커밋한다 (Actions 배포 시에도 자동 재생성된다):
 
 ```sh
 python3 tools/build_asset_index.py
 ```
-
-(GitHub Actions 배포 시에도 자동으로 재생성된다.)
 
 샘플 에셋과 앱 아이콘은 `python3 tools/generate_samples.py`로 다시 만들 수 있다.
 
