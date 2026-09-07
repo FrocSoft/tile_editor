@@ -2471,7 +2471,7 @@ function dbReq(storeName, mode, fn) {
  * 목록은 인덱스 파일 없이 git trees API로 한 번에 받는다(동시 수정 충돌 지점을 없애려고).
  */
 let GH_API = 'https://api.github.com';   // 테스트에서 모의 서버로 교체 가능
-let ghConfig = null;                     // {owner, repo, branch, token}
+let ghConfig = null;                     // {owner, repo, token} — 브랜치는 항상 리포 기본값
 
 function ghReady() {
   return !!(ghConfig && ghConfig.token && ghConfig.owner && ghConfig.repo);
@@ -2524,8 +2524,8 @@ function ghRepoBase() {
 
 // 리포 전체 파일 목록 (blob만). 커밋이 없는 빈 리포는 빈 배열.
 async function ghListTree() {
-  const branch = ghConfig.branch || 'main';
-  const res = await ghFetch(`${ghRepoBase()}/git/trees/${encodeURIComponent(branch)}?recursive=1`);
+  // 브랜치를 저장해두지 않고 HEAD를 본다 — 리포의 기본 브랜치가 바뀌어도 따라간다
+  const res = await ghFetch(`${ghRepoBase()}/git/trees/HEAD?recursive=1`);
   if (res.status === 404 || res.status === 409) return [];   // 빈 리포 / 브랜치 없음
   if (!res.ok) throw new Error('tree ' + res.status);
   const json = await res.json();
@@ -2534,9 +2534,7 @@ async function ghListTree() {
 
 // 파일 하나 읽기 → { bytes, sha } (없으면 null)
 async function ghGetFile(path) {
-  const branch = ghConfig.branch || 'main';
-  const res = await ghFetch(
-    `${ghRepoBase()}/contents/${ghPath(path)}?ref=${encodeURIComponent(branch)}`);
+  const res = await ghFetch(`${ghRepoBase()}/contents/${ghPath(path)}`);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error('get ' + res.status);
   const json = await res.json();
@@ -2552,7 +2550,7 @@ async function ghGetFile(path) {
 
 // 파일 쓰기. sha를 넘기면 그 버전 위에만 쓰이고, 다른 기기가 먼저 고쳤으면 conflict.
 async function ghPutFile(path, b64, message, sha) {
-  const body = { message, content: b64, branch: ghConfig.branch || 'main' };
+  const body = { message, content: b64 };
   if (sha) body.sha = sha;
   const res = await ghFetch(`${ghRepoBase()}/contents/${ghPath(path)}`, {
     method: 'PUT',
@@ -2571,7 +2569,7 @@ async function ghDeleteFile(path, sha, message) {
   const res = await ghFetch(`${ghRepoBase()}/contents/${ghPath(path)}`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, sha, branch: ghConfig.branch || 'main' }),
+    body: JSON.stringify({ message, sha }),
   });
   if (!res.ok && res.status !== 404) throw new Error('delete ' + res.status);
 }
@@ -2584,7 +2582,7 @@ async function ghRestoreConfig() {
   try {
     const row = await dbReq('kv', 'readonly', s => s.get('gh'));
     if (row && row.token) {
-      ghConfig = { owner: row.owner, repo: row.repo, branch: row.branch || 'main', token: row.token };
+      ghConfig = { owner: row.owner, repo: row.repo, token: row.token };
     }
   } catch (_) { /* 무시 */ }
 }
@@ -2875,9 +2873,10 @@ function updateGhStatus(msg) {
   const el = $('gh-status');
   if (!el) return;
   if (msg) { el.textContent = msg; return; }
-  el.textContent = ghReady()
-    ? `연결됨 · ${ghConfig.owner}/${ghConfig.repo}`
-    : '연결 안 됨';
+  if (!ghReady()) { el.textContent = '연결 안 됨'; return; }
+  // 몇 개를 찾았는지 같이 보여준다 — 비어 있으면 원인을 바로 알 수 있다
+  el.textContent = `연결됨 · ${ghConfig.owner}/${ghConfig.repo}` +
+    ` · 에셋 ${cloudAssets.length}개 · 작업물 ${cloudProjects.length}개`;
 }
 
 async function cloudRefreshAll() {
@@ -2893,12 +2892,11 @@ $('gh-connect').addEventListener('click', async () => {
   if (!owner || !repo || !token) { updateGhStatus('계정·리포·토큰을 모두 입력하세요.'); return; }
   updateGhStatus('연결 확인 중…');
   const prev = ghConfig;
-  ghConfig = { owner, repo, branch: 'main', token };
+  ghConfig = { owner, repo, token };
   try {
     const res = await ghFetch(ghRepoBase());
     if (!res.ok) throw new Error(String(res.status));
     const info = await res.json();
-    ghConfig.branch = info.default_branch || 'main';
     await ghSaveConfig(ghConfig);
     $('gh-token').value = '';
     updateGhStatus();
