@@ -24,7 +24,7 @@ function dayCode() {
 
 function randScrName() {
   const r = () => B36[Math.floor(Math.random() * 36)];
-  return `SCR ${r()}${r()}${dayCode()}`;
+  return `SCR-${r()}${r()}${dayCode()}`;
 }
 
 /* ===== 상태 ===== */
@@ -2626,6 +2626,14 @@ async function cloudPushProject(doc, localId) {
     let sha = known ? known.sha : null;
     if (!sha) {
       const cur = await ghGetFile(path).catch(() => null);
+      // 이 기기가 한 번도 본 적 없는 파일이 이미 있다 = 다른 기기가 같은 이름을 쓴 것.
+      // sha를 그대로 써서 올리면 남의 작업이 조용히 사라지므로 반드시 확인한다.
+      if (cur && !confirm(
+        `클라우드에 이미 "${doc.name}"이(가) 있습니다 (다른 기기에서 만든 것일 수 있음).\n` +
+        '확인 = 덮어쓰기, 취소 = 올리지 않기')) {
+        if (status) status.textContent = '이름이 겹쳐 올리지 않았습니다 — 이름을 바꿔 저장하세요.';
+        return;
+      }
       sha = cur ? cur.sha : null;
     }
     const newSha = await ghPutFile(path, b64, `Save ${doc.name}`, sha);
@@ -2887,8 +2895,23 @@ async function nextProjectName() {
     const projects = (await dbReq('projects', 'readonly', s => s.getAll())) || [];
     for (const p of projects) taken.add(p.name);
   } catch (_) { /* 목록 조회 실패 시 중복 검사 생략 */ }
+  // 다른 기기가 만든 이름과도 겹치면 안 된다 (클라우드 목록은 연결 시 받아둔 것)
+  for (const c of cloudProjects) taken.add(c.name);
   for (let i = 0; i < 100; i++) {
     const n = randScrName();
+    if (!taken.has(n)) return n;
+  }
+  // 무작위가 계속 겹치면(그날 조합을 거의 다 쓴 경우) 남은 조합을 빠짐없이 훑는다
+  const dc = dayCode();
+  for (const a of B36) {
+    for (const b of B36) {
+      const n = `SCR-${a}${b}${dc}`;
+      if (!taken.has(n)) return n;
+    }
+  }
+  // 그날 1,296개를 전부 썼다면 뒤에 번호를 붙인다
+  for (let i = 2; i < 10000; i++) {
+    const n = `SCR-00${dc}-${i}`;
     if (!taken.has(n)) return n;
   }
   return randScrName();
