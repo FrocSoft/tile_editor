@@ -15,16 +15,19 @@ const MIN_GRID = 1, MAX_GRID = 256;
 const B36 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 // 만든 날짜(1~366일째)를 36진수 두 자리로 — 본인만 역산할 수 있는 날짜 코드
-function dayCode() {
-  const d = new Date();
-  const doy = Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())
-                        - Date.UTC(d.getFullYear(), 0, 0)) / 86400000);
+function dayOfYear(d) {
+  return Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())
+                   - Date.UTC(d.getFullYear(), 0, 0)) / 86400000);
+}
+
+function dayCode(d = new Date()) {
+  const doy = dayOfYear(d);
   return B36[Math.floor(doy / 36)] + B36[doy % 36];
 }
 
-function randScrName() {
+function randScrName(code = dayCode()) {
   const r = () => B36[Math.floor(Math.random() * 36)];
-  return `SCR-${r()}${r()}${dayCode()}`;
+  return `SCR-${r()}${r()}${code}`;
 }
 
 /* ===== 상태 ===== */
@@ -2873,6 +2876,7 @@ function closeDrawers() {
 $('btn-menu').addEventListener('click', () => {
   $('project-drawer').classList.remove('hidden');
   $('save-name').value = state.projectName;
+  updateNamingHint();
   updateProjectLabel();
   refreshSavedList();
 });
@@ -2887,7 +2891,8 @@ document.querySelectorAll('.btn-close-drawer').forEach(b =>
 document.querySelectorAll('.drawer').forEach(d =>
   d.addEventListener('click', (e) => { if (e.target === d) closeDrawers(); }));
 
-async function nextProjectName() {
+async function nextProjectName(code) {
+  const dc = code || dayCode();
   // "SCR XXDD": 앞 두 자리 랜덤, 뒤 두 자리는 만든 날짜(1~366일째)의 36진수.
   // 저장된 프로젝트·현재 이름과 겹치면 앞 두 자리를 다시 뽑는다.
   const taken = new Set([state.projectName]);
@@ -2898,11 +2903,10 @@ async function nextProjectName() {
   // 다른 기기가 만든 이름과도 겹치면 안 된다 (클라우드 목록은 연결 시 받아둔 것)
   for (const c of cloudProjects) taken.add(c.name);
   for (let i = 0; i < 100; i++) {
-    const n = randScrName();
+    const n = randScrName(dc);
     if (!taken.has(n)) return n;
   }
   // 무작위가 계속 겹치면(그날 조합을 거의 다 쓴 경우) 남은 조합을 빠짐없이 훑는다
-  const dc = dayCode();
   for (const a of B36) {
     for (const b of B36) {
       const n = `SCR-${a}${b}${dc}`;
@@ -2914,7 +2918,7 @@ async function nextProjectName() {
     const n = `SCR-00${dc}-${i}`;
     if (!taken.has(n)) return n;
   }
-  return randScrName();
+  return randScrName(dc);
 }
 
 $('btn-new').addEventListener('click', async () => {
@@ -2931,6 +2935,28 @@ $('btn-new').addEventListener('click', async () => {
   closeDrawers();
   autosaveSoon();
 });
+/* ===== 이름 규칙 안내 + 날짜로 이름 짓기 ===== */
+function namingHintText(d = new Date()) {
+  const doy = dayOfYear(d);
+  const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return `이름 규칙 SCR-XXDD — XX는 랜덤(A~Z, 0~9), DD는 만든 날짜를 그 해 몇 번째 날인지(1~366) ` +
+         `36진수 두 자리로 적은 것. ${iso}는 ${doy}일째라 코드가 ${dayCode(d)} → SCR-XX${dayCode(d)}. ` +
+         `아래에서 날짜를 고르면 그 날짜 코드로 안 겹치는 이름을 지어 이름칸에 넣습니다.`;
+}
+
+function updateNamingHint(d) {
+  const el = $('naming-hint');
+  if (el) el.textContent = namingHintText(d);
+}
+
+$('name-from-date').addEventListener('click', async () => {
+  const v = $('name-date').value;
+  const d = v ? new Date(Number(v.slice(0, 4)), Number(v.slice(5, 7)) - 1, Number(v.slice(8, 10))) : new Date();
+  if (isNaN(d.getTime())) return;
+  $('save-name').value = await nextProjectName(dayCode(d));
+  updateNamingHint(d);
+});
+
 $('btn-save').addEventListener('click', () => {
   const name = $('save-name').value.trim() || state.projectName || todayStamp();
   saveProject(name);
