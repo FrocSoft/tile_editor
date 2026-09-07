@@ -1849,49 +1849,224 @@ $('btn-place').addEventListener('click', () => {
 });
 
 /* ===== 에셋 브라우저 ===== */
-async function loadAssetIndex() {
+// 에셋 항목 하나를 그린다 (리포·클라우드 공통 모양)
+function assetItemEl(labelText, thumbSrc, onPick, onDelete) {
+  const item = document.createElement('button');
+  item.className = 'asset-item';
+  const img = document.createElement('img');
+  img.src = thumbSrc;
+  img.alt = labelText;
+  const label = document.createElement('span');
+  label.textContent = labelText;
+  item.append(img, label);
+  item.addEventListener('click', () => {
+    document.querySelectorAll('#asset-list .asset-item').forEach(el => el.classList.remove('active'));
+    item.classList.add('active');
+    onPick();
+  });
+  if (onDelete) {
+    const del = document.createElement('span');
+    del.className = 'asset-del';
+    del.textContent = '✕';
+    del.addEventListener('click', (e) => { e.stopPropagation(); onDelete(); });
+    item.appendChild(del);
+  }
+  return item;
+}
+
+function assetFolderEl(title, wrap) {
+  const sec = document.createElement('div');
+  sec.className = 'asset-folder';
+  const h = document.createElement('h4');
+  h.textContent = title;
+  const grid = document.createElement('div');
+  grid.className = 'asset-grid';
+  sec.append(h, grid);
+  wrap.appendChild(sec);
+  return grid;
+}
+
+// 클라우드 에셋 섹션 (연결되어 있을 때만)
+function renderCloudAssets(wrap) {
+  if (!cloudAssets.length) return;
+  const byFolder = {};
+  for (const a of cloudAssets) (byFolder[a.folder] = byFolder[a.folder] || []).push(a);
+  for (const [folder, list] of Object.entries(byFolder)) {
+    const grid = assetFolderEl('☁︎ ' + folder, wrap);
+    for (const a of list) {
+      const el = assetItemEl(
+        a.name.replace(/\.[^.]+$/, ''),
+        'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==',
+        async () => {
+          try { await useCloudAsset(a); closeDrawers(); }
+          catch (_) { $('gh-asset-status').textContent = `${a.name}을(를) 불러오지 못했습니다.`; }
+        },
+        async () => {
+          if (!confirm(`${a.name}을(를) 클라우드에서 삭제할까요?`)) return;
+          try {
+            await ghDeleteFile(a.path, a.sha, `Delete asset ${a.name}`);
+            await dbReq('cloudAssets', 'readwrite', s => s.delete(a.path)).catch(() => {});
+            await refreshCloudAssets();
+            renderAssetDrawer();
+          } catch (_) { $('gh-asset-status').textContent = '삭제하지 못했습니다.'; }
+        });
+      // 썸네일은 캐시에 있으면 즉시, 없으면 받아서 채운다
+      cloudCacheGet(a.path).then(c => {
+        if (c && c.b64) el.querySelector('img').src = 'data:image/png;base64,' + c.b64;
+      });
+      grid.appendChild(el);
+    }
+  }
+}
+
+async function renderAssetDrawer() {
   const wrap = $('asset-list');
+  wrap.innerHTML = '';
+  renderCloudAssets(wrap);
+  await loadAssetIndex(wrap);
+}
+
+async function loadAssetIndex(wrap) {
+  wrap = wrap || $('asset-list');
   try {
     const res = await fetch('assets/index.json', { cache: 'no-cache' });
     const index = await res.json();
-    wrap.innerHTML = '';
     for (const [folder, files] of Object.entries(index)) {
-      const sec = document.createElement('div');
-      sec.className = 'asset-folder';
-      const h = document.createElement('h4');
-      h.textContent = '📁 ' + folder;
-      const grid = document.createElement('div');
-      grid.className = 'asset-grid';
+      const grid = assetFolderEl('📁 ' + folder, wrap);
       for (const file of files) {
         const url = `assets/${folder}/${file}`;
-        const item = document.createElement('button');
-        item.className = 'asset-item';
-        const img = document.createElement('img');
-        img.src = url;
-        img.alt = file;
-        const label = document.createElement('span');
-        label.textContent = file.replace(/\.[^.]+$/, '');
-        item.append(img, label);
-        item.addEventListener('click', () => {
+        const name = file.replace(/\.[^.]+$/, '');
+        grid.appendChild(assetItemEl(name, url, () => {
           const loader = new Image();
           loader.onload = () => {
-            sliceImage(loader, `${folder}/${label.textContent}`);
+            sliceImage(loader, `${folder}/${name}`);
             closeDrawers();
           };
           loader.src = url;
-          wrap.querySelectorAll('.asset-item').forEach(el => el.classList.remove('active'));
-          item.classList.add('active');
-        });
-        grid.appendChild(item);
+        }));
       }
-      sec.append(h, grid);
-      wrap.appendChild(sec);
     }
-    if (!Object.keys(index).length) wrap.textContent = '에셋이 없습니다.';
+    if (!Object.keys(index).length && !cloudAssets.length) wrap.textContent = '에셋이 없습니다.';
   } catch (_) {
-    wrap.textContent = '에셋 목록을 불러오지 못했습니다.';
+    if (!cloudAssets.length) wrap.textContent = '에셋 목록을 불러오지 못했습니다.';
   }
 }
+
+/* ===== 클라우드 에셋 ===== */
+let cloudAssets = [];   // [{path, folder, name, sha}]
+
+// 이미지를 2048px 상한으로 정규화해 PNG base64로 (분절 상한과 동일하게 맞춘다)
+function imageToPngB64(img) {
+  const scale = Math.min(1, 2048 / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const cc = c.getContext('2d');
+  cc.imageSmoothingEnabled = false;
+  cc.drawImage(img, 0, 0, w, h);
+  return c.toDataURL('image/png').split(',')[1];
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('image'));
+    img.src = src;
+  });
+}
+
+async function cloudCachePut(path, sha, b64) {
+  try {
+    await dbReq('cloudAssets', 'readwrite', s => s.put({ path, sha, b64 }));
+  } catch (_) { /* 용량 초과 등은 무시 — 캐시는 선택적 */ }
+}
+async function cloudCacheGet(path) {
+  try { return await dbReq('cloudAssets', 'readonly', s => s.get(path)); }
+  catch (_) { return null; }
+}
+
+// 클라우드 에셋 목록 갱신: 온라인이면 트리 API, 아니면 캐시에 있는 것만
+async function refreshCloudAssets() {
+  if (!ghReady()) { cloudAssets = []; return; }
+  try {
+    const tree = await ghListTree();
+    cloudAssets = tree
+      .filter(t => t.path.startsWith('assets/'))
+      .map(t => {
+        const rest = t.path.slice('assets/'.length);
+        const i = rest.lastIndexOf('/');
+        return {
+          path: t.path, sha: t.sha,
+          folder: i >= 0 ? rest.slice(0, i) : '(루트)',
+          name: i >= 0 ? rest.slice(i + 1) : rest,
+        };
+      });
+  } catch (_) {
+    // 오프라인·인증 실패 → 캐시된 것만 보여준다
+    try {
+      const rows = (await dbReq('cloudAssets', 'readonly', s => s.getAll())) || [];
+      cloudAssets = rows.map(r => {
+        const rest = r.path.slice('assets/'.length);
+        const i = rest.lastIndexOf('/');
+        return {
+          path: r.path, sha: r.sha, cached: true,
+          folder: i >= 0 ? rest.slice(0, i) : '(루트)',
+          name: i >= 0 ? rest.slice(i + 1) : rest,
+        };
+      });
+    } catch (__) { cloudAssets = []; }
+  }
+}
+
+// 클라우드 에셋 하나를 분절해 소스로 (캐시 우선 → 없으면 내려받아 캐시)
+async function useCloudAsset(a) {
+  let b64 = null;
+  const cached = await cloudCacheGet(a.path);
+  if (cached && cached.sha === a.sha) b64 = cached.b64;
+  if (!b64) {
+    const file = await ghGetFile(a.path);
+    if (!file) throw new Error('missing');
+    b64 = bytesToB64(file.bytes);
+    await cloudCachePut(a.path, file.sha, b64);
+  }
+  const img = await loadImage('data:image/png;base64,' + b64);
+  sliceImage(img, `${a.folder}/${a.name.replace(/\.[^.]+$/, '')}`);
+}
+
+$('gh-asset-upload').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (!files.length) return;
+  const status = $('gh-asset-status');
+  if (!ghReady()) { status.textContent = '먼저 프로젝트 서랍에서 클라우드에 연결하세요.'; return; }
+  const folder = ($('gh-asset-folder').value || '').trim().replace(/^\/+|\/+$/g, '') || 'uploads';
+  let done = 0;
+  for (const f of files) {
+    status.textContent = `올리는 중… (${done + 1}/${files.length})`;
+    try {
+      const url = URL.createObjectURL(f);
+      const img = await loadImage(url);
+      URL.revokeObjectURL(url);
+      const b64 = imageToPngB64(img);
+      const name = f.name.replace(/\.[^.]+$/, '') + '.png';
+      const path = `assets/${folder}/${name}`;
+      const existing = await ghGetFile(path).catch(() => null);
+      const sha = await ghPutFile(path, b64, `Add asset ${name}`, existing ? existing.sha : null);
+      await cloudCachePut(path, sha, b64);
+      done++;
+    } catch (err) {
+      status.textContent = err && err.code === 'auth'
+        ? '토큰이 거부되었습니다. 권한과 만료일을 확인하세요.'
+        : `올리기 실패: ${f.name}`;
+      return;
+    }
+  }
+  status.textContent = `${done}장 올렸습니다.`;
+  await refreshCloudAssets();
+  renderAssetDrawer();
+});
 
 let importObjectUrl = null;   // 페이지 넘김 시 재사용하므로 다음 가져오기 전까지 유지
 
@@ -2150,11 +2325,20 @@ let dbPromise = null;
 function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, 2);
     req.onupgradeneeded = () => {
       const db = req.result;
-      db.createObjectStore('projects', { keyPath: 'id', autoIncrement: true });
-      db.createObjectStore('kv', { keyPath: 'key' });
+      // 기존 기기는 업그레이드 경로로 들어오므로 스토어마다 존재 여부를 확인한다
+      if (!db.objectStoreNames.contains('projects')) {
+        db.createObjectStore('projects', { keyPath: 'id', autoIncrement: true });
+      }
+      if (!db.objectStoreNames.contains('kv')) {
+        db.createObjectStore('kv', { keyPath: 'key' });
+      }
+      // 클라우드에서 받은 에셋 캐시 (오프라인에서도 목록·사용 가능하도록)
+      if (!db.objectStoreNames.contains('cloudAssets')) {
+        db.createObjectStore('cloudAssets', { keyPath: 'path' });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -2168,6 +2352,132 @@ function dbReq(storeName, mode, fn) {
     tx.oncomplete = () => resolve(req && req.result);
     tx.onerror = () => reject(tx.error);
   }));
+}
+
+/* ===== GitHub 비공개 리포 = 클라우드 저장소 =====
+ * 앱은 공개 리포(Pages)에서 배포되지만, 데이터는 사용자의 별도 비공개 리포에 둔다.
+ * 토큰은 이 기기의 IndexedDB에만 저장되며 백업 파일에도 포함되지 않는다.
+ *   projects/<이름>.json   작업물
+ *   assets/<폴더>/<파일>   에셋
+ * 목록은 인덱스 파일 없이 git trees API로 한 번에 받는다(동시 수정 충돌 지점을 없애려고).
+ */
+let GH_API = 'https://api.github.com';   // 테스트에서 모의 서버로 교체 가능
+let ghConfig = null;                     // {owner, repo, branch, token}
+
+function ghReady() {
+  return !!(ghConfig && ghConfig.token && ghConfig.owner && ghConfig.repo);
+}
+
+function ghPath(path) {
+  return path.split('/').map(encodeURIComponent).join('/');
+}
+
+// UTF-8 안전 base64 (한글 파일명·작품명이 들어가므로 btoa 직접 사용 불가)
+function utf8ToB64(str) {
+  return bytesToB64(new TextEncoder().encode(str));
+}
+function bytesToB64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+function b64ToBytes(b64) {
+  const bin = atob(String(b64).replace(/\s/g, ''));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function b64ToUtf8(b64) {
+  return new TextDecoder().decode(b64ToBytes(b64));
+}
+
+async function ghFetch(path, opts = {}) {
+  const res = await fetch(GH_API + path, {
+    ...opts,
+    headers: {
+      Authorization: `Bearer ${ghConfig.token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(opts.headers || {}),
+    },
+  });
+  if (res.status === 401 || res.status === 403) {
+    throw Object.assign(new Error('auth'), { code: 'auth', status: res.status });
+  }
+  return res;
+}
+
+function ghRepoBase() {
+  return `/repos/${encodeURIComponent(ghConfig.owner)}/${encodeURIComponent(ghConfig.repo)}`;
+}
+
+// 리포 전체 파일 목록 (blob만). 커밋이 없는 빈 리포는 빈 배열.
+async function ghListTree() {
+  const branch = ghConfig.branch || 'main';
+  const res = await ghFetch(`${ghRepoBase()}/git/trees/${encodeURIComponent(branch)}?recursive=1`);
+  if (res.status === 404 || res.status === 409) return [];   // 빈 리포 / 브랜치 없음
+  if (!res.ok) throw new Error('tree ' + res.status);
+  const json = await res.json();
+  return (json.tree || []).filter(t => t.type === 'blob');
+}
+
+// 파일 하나 읽기 → { bytes, sha } (없으면 null)
+async function ghGetFile(path) {
+  const branch = ghConfig.branch || 'main';
+  const res = await ghFetch(
+    `${ghRepoBase()}/contents/${ghPath(path)}?ref=${encodeURIComponent(branch)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error('get ' + res.status);
+  const json = await res.json();
+  // 1MB를 넘으면 Contents API가 내용을 비워 보내므로 blob API로 다시 받는다
+  if (!json.content && json.sha) {
+    const b = await ghFetch(`${ghRepoBase()}/git/blobs/${json.sha}`);
+    if (!b.ok) throw new Error('blob ' + b.status);
+    const bj = await b.json();
+    return { bytes: b64ToBytes(bj.content), sha: json.sha };
+  }
+  return { bytes: b64ToBytes(json.content), sha: json.sha };
+}
+
+// 파일 쓰기. sha를 넘기면 그 버전 위에만 쓰이고, 다른 기기가 먼저 고쳤으면 conflict.
+async function ghPutFile(path, b64, message, sha) {
+  const body = { message, content: b64, branch: ghConfig.branch || 'main' };
+  if (sha) body.sha = sha;
+  const res = await ghFetch(`${ghRepoBase()}/contents/${ghPath(path)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 409 || res.status === 422) {
+    throw Object.assign(new Error('conflict'), { code: 'conflict' });
+  }
+  if (!res.ok) throw new Error('put ' + res.status);
+  const json = await res.json();
+  return json.content ? json.content.sha : null;
+}
+
+async function ghDeleteFile(path, sha, message) {
+  const res = await ghFetch(`${ghRepoBase()}/contents/${ghPath(path)}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, sha, branch: ghConfig.branch || 'main' }),
+  });
+  if (!res.ok && res.status !== 404) throw new Error('delete ' + res.status);
+}
+
+async function ghSaveConfig(cfg) {
+  ghConfig = cfg;
+  await dbReq('kv', 'readwrite', s => s.put({ key: 'gh', ...cfg }));
+}
+async function ghRestoreConfig() {
+  try {
+    const row = await dbReq('kv', 'readonly', s => s.get('gh'));
+    if (row && row.token) {
+      ghConfig = { owner: row.owner, repo: row.repo, branch: row.branch || 'main', token: row.token };
+    }
+  } catch (_) { /* 무시 */ }
 }
 
 function serializeDoc() {
@@ -2287,6 +2597,90 @@ async function saveProject(name) {
   state.dirty = false;   // 방금 저장했으므로 (autosaveSoon이 세운 플래그 해제)
   updateProjectLabel();
   refreshSavedList();
+  if (ghReady() && ghAutoPush()) cloudPushProject(doc, id);
+}
+
+/* ===== 작업물 클라우드 동기화 =====
+ * 올리기는 저장할 때 자동, 받기는 항상 명시적으로.
+ * 다른 기기가 먼저 고친 경우 sha가 어긋나 conflict가 나고, 그때만 사용자에게 묻는다.
+ */
+let cloudProjects = [];   // [{name, path, sha}]
+
+function ghAutoPush() {
+  const el = $('gh-autopush');
+  return !el || el.checked;
+}
+
+function cloudProjectPath(name) {
+  return `projects/${name}.json`;
+}
+
+async function cloudPushProject(doc, localId) {
+  const path = cloudProjectPath(doc.name);
+  const status = $('gh-status');
+  const body = { ...doc };
+  delete body.id;                       // 로컬 IndexedDB id는 기기마다 다르므로 보내지 않는다
+  const b64 = utf8ToB64(JSON.stringify(body));
+  const known = cloudProjects.find(p => p.path === path);
+  try {
+    let sha = known ? known.sha : null;
+    if (!sha) {
+      const cur = await ghGetFile(path).catch(() => null);
+      sha = cur ? cur.sha : null;
+    }
+    const newSha = await ghPutFile(path, b64, `Save ${doc.name}`, sha);
+    if (known) known.sha = newSha;
+    else cloudProjects.push({ name: doc.name, path, sha: newSha });
+    if (status) status.textContent = `연결됨 · ${ghConfig.owner}/${ghConfig.repo} · 방금 올림`;
+  } catch (err) {
+    if (err && err.code === 'conflict') {
+      const ok = confirm(
+        `"${doc.name}"이(가) 다른 기기에서 바뀌었습니다.\n확인 = 이 기기 내용으로 덮어쓰기, 취소 = 올리지 않음`);
+      if (ok) {
+        const cur = await ghGetFile(path).catch(() => null);
+        if (cur) {
+          try {
+            const forced = await ghPutFile(path, b64, `Overwrite ${doc.name}`, cur.sha);
+            const k = cloudProjects.find(p => p.path === path);
+            if (k) k.sha = forced;
+          } catch (_) { /* 무시 */ }
+        }
+      }
+    } else if (status) {
+      status.textContent = err && err.code === 'auth'
+        ? '토큰이 거부되었습니다 — 권한/만료일 확인'
+        : '올리지 못했습니다 (오프라인일 수 있음)';
+    }
+  }
+}
+
+async function refreshCloudProjects() {
+  if (!ghReady()) { cloudProjects = []; return; }
+  try {
+    const tree = await ghListTree();
+    cloudProjects = tree
+      .filter(t => t.path.startsWith('projects/') && t.path.endsWith('.json'))
+      .map(t => ({
+        path: t.path, sha: t.sha,
+        name: t.path.slice('projects/'.length).replace(/\.json$/, ''),
+      }));
+  } catch (_) { cloudProjects = []; }
+}
+
+// 클라우드 작업물을 받아서 로컬에 저장하고 연다
+async function cloudPullProject(p) {
+  const file = await ghGetFile(p.path);
+  if (!file) throw new Error('missing');
+  const doc = JSON.parse(new TextDecoder().decode(file.bytes));
+  // id 속성이 남아 있으면 autoIncrement가 동작하지 않으므로 아예 제거한다
+  const { id: _drop, ...fresh } = doc;
+  const id = await dbReq('projects', 'readwrite', s => s.put(fresh));
+  await loadDoc(doc);
+  state.projectId = id;
+  state.projectName = doc.name;
+  updateProjectLabel();
+  refreshSavedList();
+  autosaveSoon();
 }
 
 async function refreshSavedList() {
@@ -2297,6 +2691,7 @@ async function refreshSavedList() {
     projects = (await dbReq('projects', 'readonly', s => s.getAll())) || [];
   } catch (_) { /* 무시 */ }
   projects.sort((a, b) => b.updated - a.updated);
+  const localNames = new Set(projects.map(p => p.name));
   for (const p of projects) {
     const li = document.createElement('li');
     const thumb = document.createElement('img');
@@ -2337,9 +2732,85 @@ async function refreshSavedList() {
     li.style.fontSize = '13px';
     list.appendChild(li);
   }
+  // 클라우드에만 있는 작업물 (아직 이 기기에 없는 것)
+  for (const c of cloudProjects) {
+    if (localNames.has(c.name)) continue;
+    const li = document.createElement('li');
+    li.className = 'cloud-only';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = `☁︎ ${c.name}`;
+    const getBtn = document.createElement('button');
+    getBtn.textContent = '받기';
+    getBtn.addEventListener('click', async () => {
+      getBtn.textContent = '받는 중…';
+      try { await cloudPullProject(c); closeDrawers(); }
+      catch (_) { getBtn.textContent = '실패'; }
+    });
+    li.append(name, getBtn);
+    list.appendChild(li);
+  }
 }
 
 /* ===== 전체 백업 (모든 프로젝트 + 현재 캔버스 + 팔레트) ===== */
+/* ===== 클라우드 연결 UI ===== */
+function updateGhStatus(msg) {
+  const el = $('gh-status');
+  if (!el) return;
+  if (msg) { el.textContent = msg; return; }
+  el.textContent = ghReady()
+    ? `연결됨 · ${ghConfig.owner}/${ghConfig.repo}`
+    : '연결 안 됨';
+}
+
+async function cloudRefreshAll() {
+  await Promise.all([refreshCloudProjects(), refreshCloudAssets()]);
+  refreshSavedList();
+  renderAssetDrawer();
+}
+
+$('gh-connect').addEventListener('click', async () => {
+  const owner = $('gh-owner').value.trim();
+  const repo = $('gh-repo').value.trim();
+  const token = $('gh-token').value.trim();
+  if (!owner || !repo || !token) { updateGhStatus('계정·리포·토큰을 모두 입력하세요.'); return; }
+  updateGhStatus('연결 확인 중…');
+  const prev = ghConfig;
+  ghConfig = { owner, repo, branch: 'main', token };
+  try {
+    const res = await ghFetch(ghRepoBase());
+    if (!res.ok) throw new Error(String(res.status));
+    const info = await res.json();
+    ghConfig.branch = info.default_branch || 'main';
+    await ghSaveConfig(ghConfig);
+    $('gh-token').value = '';
+    updateGhStatus();
+    await cloudRefreshAll();
+  } catch (err) {
+    ghConfig = prev;
+    updateGhStatus(err && err.code === 'auth'
+      ? '토큰이 거부되었습니다 — Contents 읽기/쓰기 권한과 만료일을 확인하세요.'
+      : '리포를 찾지 못했습니다 — 계정/리포 이름을 확인하세요.');
+  }
+});
+
+$('gh-disconnect').addEventListener('click', async () => {
+  ghConfig = null;
+  cloudProjects = [];
+  cloudAssets = [];
+  try { await dbReq('kv', 'readwrite', s => s.delete('gh')); } catch (_) { /* 무시 */ }
+  updateGhStatus();
+  refreshSavedList();
+  renderAssetDrawer();
+});
+
+$('gh-pull').addEventListener('click', async () => {
+  if (!ghReady()) { updateGhStatus('먼저 연결하세요.'); return; }
+  updateGhStatus('목록 받는 중…');
+  await cloudRefreshAll();
+  updateGhStatus();
+});
+
 $('btn-backup-export').addEventListener('click', async () => {
   let projects = [];
   try {
@@ -2401,6 +2872,7 @@ $('project-name').addEventListener('click', () => $('btn-menu').click());
 $('btn-quicksave').addEventListener('click', () => saveProject(state.projectName));
 $('btn-assets').addEventListener('click', () => {
   $('asset-drawer').classList.remove('hidden');
+  renderAssetDrawer();
 });
 document.querySelectorAll('.btn-close-drawer').forEach(b =>
   b.addEventListener('click', closeDrawers));
@@ -2531,7 +3003,14 @@ async function init() {
   newDoc(32, 24);
   updateSizeLabel();
   updateOnline();
-  loadAssetIndex();
+  await ghRestoreConfig();
+  updateGhStatus();
+  if (ghConfig) {
+    $('gh-owner').value = ghConfig.owner || '';
+    $('gh-repo').value = ghConfig.repo || '';
+  }
+  renderAssetDrawer();
+  if (ghReady()) cloudRefreshAll();
   try {
     const row = await dbReq('kv', 'readonly', s => s.get('masterPalette'));
     if (row && row.colors && row.colors.length >= 2) masterPalette = row.colors.slice();
@@ -2582,6 +3061,10 @@ window.addEventListener('unhandledrejection', (e) => {
 
 /* ===== 테스트/디버그 훅 ===== */
 window.__state = () => state;
+// 테스트용: GitHub API 베이스를 모의 서버로 바꿔 실제 토큰 없이 검증한다
+window.__setGhApi = (base) => { GH_API = base; };
+window.__ghConfig = () => ghConfig;
+window.__cloud = () => ({ projects: cloudProjects, assets: cloudAssets });
 window.__countFilled = (layer) => {
   const cells = layer === 'bg' ? state.bg : state.sprite;
   let n = 0;

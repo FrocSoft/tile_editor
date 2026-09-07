@@ -146,7 +146,15 @@
     <div class="drawer-panel">
       <h2>에셋</h2>
       <div id="asset-list"></div>
-      <h3>직접 가져오기</h3>
+      <h3>클라우드 에셋으로 올리기</h3>
+      <div class="drawer-row">
+        <input id="gh-asset-folder" type="text" placeholder="폴더 이름 (예: mytiles)" autocomplete="off" autocapitalize="off">
+        <label class="big file-label">이미지 올리기
+          <input id="gh-asset-upload" type="file" accept="image/*" multiple hidden>
+        </label>
+      </div>
+      <p class="hint" id="gh-asset-status">클라우드에 연결하면 올린 에셋이 위 목록에 바로 나타나고 모든 기기에서 보입니다.</p>
+      <h3>직접 가져오기 (이 기기에서만)</h3>
       <label class="big file-label">
         이미지 선택 (사진/파일)
         <input id="file-input" type="file" accept="image/*" hidden>
@@ -182,6 +190,25 @@
         아래로 갈수록 고해상도(1타일이 실물에서 작아짐) — 탭하면 캔버스 크기가 바뀝니다.</p>
       <h3>저장된 작업</h3>
       <ul id="saved-list"></ul>
+      <h3>클라우드 (비공개 리포)</h3>
+      <p class="hint" id="gh-status">연결 안 됨</p>
+      <div class="drawer-row">
+        <input id="gh-owner" type="text" placeholder="깃허브 계정" autocomplete="off" autocapitalize="off">
+        <input id="gh-repo" type="text" placeholder="비공개 리포 이름" autocomplete="off" autocapitalize="off">
+      </div>
+      <div class="drawer-row">
+        <input id="gh-token" type="password" placeholder="Fine-grained 토큰" autocomplete="off">
+        <button id="gh-connect" class="big">연결</button>
+      </div>
+      <div class="drawer-row">
+        <button id="gh-pull" class="big">클라우드 목록 새로고침</button>
+        <button id="gh-disconnect" class="big">연결 해제</button>
+      </div>
+      <label class="gh-check"><input id="gh-autopush" type="checkbox" checked> 저장할 때 클라우드에도 올리기</label>
+      <p class="hint">토큰은 이 기기에만 저장되며 백업 파일에는 포함되지 않습니다.
+        깃허브 Settings → Developer settings → Personal access tokens → Fine-grained에서
+        그 리포에만 <b>Contents: Read and write</b> 권한을 준 토큰을 만드세요.</p>
+
       <h3>백업</h3>
       <div class="drawer-row">
         <button id="btn-backup-export" class="big">전체 백업 내보내기</button>
