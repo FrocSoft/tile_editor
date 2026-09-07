@@ -3228,8 +3228,11 @@ function renderPhysList() {
     const btn = document.createElement('button');
     btn.className = 'phys-item';
     const mm = pw / r.w;
+    // NES 화면(32×30=960타일) 대비 크기를 같이 보여준다 — 감을 잡을 기준점이 필요하다
+    const tiles = r.w * r.h;
+    const vsNes = tiles >= 960 ? `NES 화면 ${(tiles / 960).toFixed(1)}장` : `NES 화면의 ${Math.round(tiles / 960 * 100)}%`;
     btn.textContent =
-      `${r.w}×${r.h} 타일 · 1타일≈${mm >= 10 ? Math.round(mm) : mm.toFixed(1)}㎜ · 오차 ${(r.err * 100).toFixed(r.err < 0.001 ? 2 : 1)}%`;
+      `${r.w}×${r.h} 타일 · 1타일≈${mm >= 10 ? Math.round(mm) : mm.toFixed(1)}㎜ · 오차 ${(r.err * 100).toFixed(r.err < 0.001 ? 2 : 1)}% · ${vsNes}`;
     btn.addEventListener('click', () => {
       resizeGrid(r.w, r.h);
       fitView();
