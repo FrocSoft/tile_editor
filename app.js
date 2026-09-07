@@ -1956,6 +1956,8 @@ async function loadAssetIndex(wrap) {
 }
 
 /* ===== 클라우드 에셋 ===== */
+// assets/ 아래에는 이미지가 아닌 파일도 있을 수 있다 (.gitkeep, README.md 등)
+const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 let cloudAssets = [];   // [{path, folder, name, sha}]
 
 /* ===== 팔레트 PNG 인코더 =====
@@ -2100,7 +2102,7 @@ async function refreshCloudAssets() {
   try {
     const tree = await ghListTree();
     cloudAssets = tree
-      .filter(t => t.path.startsWith('assets/'))
+      .filter(t => t.path.startsWith('assets/') && IMAGE_RE.test(t.path))
       .map(t => {
         const rest = t.path.slice('assets/'.length);
         const i = rest.lastIndexOf('/');
