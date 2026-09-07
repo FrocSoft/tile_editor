@@ -1877,16 +1877,62 @@ function assetItemEl(labelText, thumbSrc, onPick, onDelete) {
   return item;
 }
 
-function assetFolderEl(title, wrap) {
+function assetFolderEl(title, wrap, onAll) {
   const sec = document.createElement('div');
   sec.className = 'asset-folder';
   const h = document.createElement('h4');
-  h.textContent = title;
+  const label = document.createElement('span');
+  label.className = 'folder-name';
+  label.textContent = title;
+  h.appendChild(label);
+  if (onAll) {
+    const btn = document.createElement('button');
+    btn.className = 'chip folder-all';
+    btn.textContent = '전부 한 시트로';
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const old = btn.textContent;
+      btn.textContent = '불러오는 중…';
+      try { await onAll(); } catch (_) { btn.textContent = '실패'; return; }
+      btn.textContent = old;
+    });
+    h.appendChild(btn);
+  }
   const grid = document.createElement('div');
   grid.className = 'asset-grid';
   sec.append(h, grid);
   wrap.appendChild(sec);
   return grid;
+}
+
+/* ===== 폴더의 이미지를 한 장으로 이어붙이기 =====
+ * 프레임이 파일별로 나뉘어 있어도 시트 하나로 합쳐, 소스 패널에서 드래그로 고를 수 있게 한다.
+ * 각 칸을 8px(타일) 배수로 맞춰야 분절 격자가 어긋나지 않는다.
+ */
+const ceil8 = (n) => Math.max(TILE, Math.ceil(n / TILE) * TILE);
+
+async function composeFolderSheet(images, name) {
+  if (!images.length) return;
+  const cw = ceil8(Math.max(...images.map(i => i.naturalWidth || i.width)));
+  const ch = ceil8(Math.max(...images.map(i => i.naturalHeight || i.height)));
+  // 2048px 상한 안에서 되도록 정사각형에 가깝게 배치 (상한을 넘으면 분절 때 축소돼 격자가 깨진다)
+  const maxCols = Math.max(1, Math.floor(2048 / cw));
+  const maxRows = Math.max(1, Math.floor(2048 / ch));
+  let cols = Math.min(maxCols, Math.max(1, Math.ceil(Math.sqrt(images.length))));
+  if (Math.ceil(images.length / cols) > maxRows) cols = maxCols;
+  const fit = Math.min(images.length, cols * maxRows);
+  const rows = Math.ceil(fit / cols);
+
+  const c = document.createElement('canvas');
+  c.width = cols * cw;
+  c.height = rows * ch;
+  const cc = c.getContext('2d');
+  cc.imageSmoothingEnabled = false;
+  for (let i = 0; i < fit; i++) {
+    cc.drawImage(images[i], (i % cols) * cw, Math.floor(i / cols) * ch);
+  }
+  await sliceImage(c, name + (fit < images.length ? ` (${fit}/${images.length})` : ''));
+  closeDrawers();
 }
 
 // 클라우드 에셋 섹션 (연결되어 있을 때만)
@@ -1895,7 +1941,22 @@ function renderCloudAssets(wrap) {
   const byFolder = {};
   for (const a of cloudAssets) (byFolder[a.folder] = byFolder[a.folder] || []).push(a);
   for (const [folder, list] of Object.entries(byFolder)) {
-    const grid = assetFolderEl('☁︎ ' + folder, wrap);
+    const grid = assetFolderEl('☁︎ ' + folder, wrap, async () => {
+      const imgs = [];
+      for (const a of [...list].sort((x, y) => x.name.localeCompare(y.name))) {
+        let b64 = null;
+        const cached = await cloudCacheGet(a.path);
+        if (cached && cached.sha === a.sha) b64 = cached.b64;
+        if (!b64) {
+          const file = await ghGetFile(a.path);
+          if (!file) continue;
+          b64 = bytesToB64(file.bytes);
+          await cloudCachePut(a.path, file.sha, b64);
+        }
+        imgs.push(await loadImage('data:image/png;base64,' + b64));
+      }
+      await composeFolderSheet(imgs, folder);
+    });
     for (const a of list) {
       const el = assetItemEl(
         a.name.replace(/\.[^.]+$/, ''),
@@ -1935,7 +1996,13 @@ async function loadAssetIndex(wrap) {
     const res = await fetch('assets/index.json', { cache: 'no-cache' });
     const index = await res.json();
     for (const [folder, files] of Object.entries(index)) {
-      const grid = assetFolderEl('📁 ' + folder, wrap);
+      const grid = assetFolderEl('📁 ' + folder, wrap, async () => {
+        const imgs = [];
+        for (const file of [...files].sort((a, b) => a.localeCompare(b))) {
+          imgs.push(await loadImage(`assets/${folder}/${file}`));
+        }
+        await composeFolderSheet(imgs, folder);
+      });
       for (const file of files) {
         const url = `assets/${folder}/${file}`;
         const name = file.replace(/\.[^.]+$/, '');

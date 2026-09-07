@@ -465,3 +465,6 @@ button.big, .file-label {
   background: rgba(26,27,38,0.85);
   font-size: 12px;
 }
+
+.asset-folder h4 { display: flex; align-items: center; gap: 8px; }
+.chip.folder-all { min-height: 32px; padding: 0 10px; font-size: 12px; margin-left: auto; }
