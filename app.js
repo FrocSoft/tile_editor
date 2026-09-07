@@ -2789,7 +2789,9 @@ function cloudProjectPath(name) {
   return `projects/${name}.json`;
 }
 
-async function cloudPushProject(doc, localId) {
+// silent=true면 확인창을 띄우지 않고 실패로 두어(밀린 목록에 남겨) 나중에 다시 시도한다.
+// 성공 여부를 돌려준다.
+async function cloudPushProject(doc, localId, silent) {
   const path = cloudProjectPath(doc.name);
   const status = $('gh-status');
   const body = { ...doc };
@@ -2802,21 +2804,23 @@ async function cloudPushProject(doc, localId) {
       const cur = await ghGetFile(path).catch(() => null);
       // 이 기기가 한 번도 본 적 없는 파일이 이미 있다 = 다른 기기가 같은 이름을 쓴 것.
       // sha를 그대로 써서 올리면 남의 작업이 조용히 사라지므로 반드시 확인한다.
-      if (cur && !confirm(
+      if (cur && (silent || !confirm(
         `클라우드에 이미 "${doc.name}"이(가) 있습니다 (다른 기기에서 만든 것일 수 있음).\n` +
-        '확인 = 덮어쓰기, 취소 = 올리지 않기')) {
-        if (status) status.textContent = '이름이 겹쳐 올리지 않았습니다 — 이름을 바꿔 저장하세요.';
-        return;
+        '확인 = 덮어쓰기, 취소 = 올리지 않기'))) {
+        if (status && !silent) status.textContent = '이름이 겹쳐 올리지 않았습니다 — 이름을 바꿔 저장하세요.';
+        return false;
       }
       sha = cur ? cur.sha : null;
     }
     const newSha = await ghPutFile(path, b64, `Save ${doc.name}`, sha);
     if (known) known.sha = newSha;
     else cloudProjects.push({ name: doc.name, path, sha: newSha });
-    if (status) status.textContent = `연결됨 · ${ghConfig.owner}/${ghConfig.repo} · 방금 올림`;
+    await unmarkPending(doc.name);
+    updateGhStatus();
+    return true;
   } catch (err) {
     if (err && err.code === 'conflict') {
-      const ok = confirm(
+      const ok = !silent && confirm(
         `"${doc.name}"이(가) 다른 기기에서 바뀌었습니다.\n확인 = 이 기기 내용으로 덮어쓰기, 취소 = 올리지 않음`);
       if (ok) {
         const cur = await ghGetFile(path).catch(() => null);
@@ -2825,16 +2829,71 @@ async function cloudPushProject(doc, localId) {
             const forced = await ghPutFile(path, b64, `Overwrite ${doc.name}`, cur.sha);
             const k = cloudProjects.find(p => p.path === path);
             if (k) k.sha = forced;
+            await unmarkPending(doc.name);
+            return true;
           } catch (_) { /* 무시 */ }
         }
       }
-    } else if (status) {
+    } else if (status && !silent) {
       status.textContent = err && err.code === 'auth'
         ? '토큰이 거부되었습니다 — 권한/만료일 확인'
-        : '올리지 못했습니다 (오프라인일 수 있음)';
+        : '올리지 못했습니다 — 온라인이 되면 자동으로 다시 올립니다';
     }
+    await markPending(doc.name);   // 나중에 다시 시도
+    updateGhStatus();
+    return false;
   }
 }
+
+/* ===== 밀린 업로드 =====
+ * 오프라인에서 저장한 작업물은 로컬에만 남는다. 이름을 적어 두었다가
+ * 다시 온라인이 되면(앱 시작·목록 새로고침·연결 복구) 자동으로 올린다.
+ */
+let ghPending = [];
+
+async function restorePending() {
+  try {
+    const row = await dbReq('kv', 'readonly', s => s.get('ghPending'));
+    ghPending = (row && row.names) || [];
+  } catch (_) { ghPending = []; }
+}
+async function savePending() {
+  try { await dbReq('kv', 'readwrite', s => s.put({ key: 'ghPending', names: ghPending })); }
+  catch (_) { /* 무시 */ }
+}
+async function markPending(name) {
+  if (!ghPending.includes(name)) { ghPending.push(name); await savePending(); }
+}
+async function unmarkPending(name) {
+  const i = ghPending.indexOf(name);
+  if (i >= 0) { ghPending.splice(i, 1); await savePending(); }
+}
+
+let flushing = false;
+
+async function flushPending() {
+  // 동시에 두 번 돌면 같은 파일을 서로 밀어내며 헛된 충돌이 난다
+  // (online 이벤트와 목록 새로고침이 겹치는 경우)
+  if (flushing) return;
+  if (!ghReady() || !ghPending.length || navigator.onLine === false) return;
+  flushing = true;
+  try {
+    let projects = [];
+    try { projects = (await dbReq('projects', 'readonly', s => s.getAll())) || []; }
+    catch (_) { return; }
+    for (const name of [...ghPending]) {
+      const doc = projects.filter(p => p.name === name).sort((a, b) => b.updated - a.updated)[0];
+      if (!doc) { await unmarkPending(name); continue; }   // 지워진 작업물
+      const ok = await cloudPushProject(doc, null, true);  // 조용히 시도, 실패하면 다음 기회에
+      if (!ok) break;
+    }
+  } finally {
+    flushing = false;
+  }
+  updateGhStatus();
+}
+
+window.addEventListener('online', () => { flushPending(); });
 
 async function refreshCloudProjects() {
   if (!ghReady()) { cloudProjects = []; return; }
@@ -2943,10 +3002,12 @@ function updateGhStatus(msg) {
   if (!ghReady()) { el.textContent = '연결 안 됨'; return; }
   // 몇 개를 찾았는지 같이 보여준다 — 비어 있으면 원인을 바로 알 수 있다
   el.textContent = `연결됨 · ${ghConfig.owner}/${ghConfig.repo}` +
-    ` · 에셋 ${cloudAssets.length}개 · 작업물 ${cloudProjects.length}개`;
+    ` · 에셋 ${cloudAssets.length}개 · 작업물 ${cloudProjects.length}개` +
+    (ghPending.length ? ` · 올릴 것 ${ghPending.length}개` : '');
 }
 
 async function cloudRefreshAll() {
+  await flushPending();
   await Promise.all([refreshCloudProjects(), refreshCloudAssets()]);
   refreshSavedList();
   renderAssetDrawer();
@@ -3224,6 +3285,7 @@ async function init() {
   updateSizeLabel();
   updateOnline();
   await ghRestoreConfig();
+  await restorePending();
   updateGhStatus();
   if (ghConfig) {
     $('gh-owner').value = ghConfig.owner || '';
@@ -3285,6 +3347,7 @@ window.__state = () => state;
 window.__setGhApi = (base) => { GH_API = base; };
 window.__ghConfig = () => ghConfig;
 window.__cloud = () => ({ projects: cloudProjects, assets: cloudAssets });
+window.__pending = () => ghPending;
 window.__countFilled = (layer) => {
   const cells = layer === 'bg' ? state.bg : state.sprite;
   let n = 0;
