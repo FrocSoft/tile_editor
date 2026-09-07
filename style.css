@@ -447,3 +447,21 @@ button.big, .file-label {
   color: #fff;
   font-size: 13px;
 }
+
+/* 클라우드 UI */
+.gh-check { display: flex; align-items: center; gap: 8px; min-height: 36px; font-size: 13px; }
+.gh-check input { width: 20px; height: 20px; }
+#saved-list li.cloud-only { opacity: 0.72; }
+.asset-item { position: relative; }
+.asset-del {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 22px;
+  height: 22px;
+  line-height: 22px;
+  text-align: center;
+  border-radius: 11px;
+  background: rgba(26,27,38,0.85);
+  font-size: 12px;
+}
