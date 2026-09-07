@@ -1958,17 +1958,121 @@ async function loadAssetIndex(wrap) {
 /* ===== 클라우드 에셋 ===== */
 let cloudAssets = [];   // [{path, folder, name, sha}]
 
+/* ===== 팔레트 PNG 인코더 =====
+ * 캔버스의 toDataURL은 항상 32비트 RGBA로 쓴다. 8비트 타일 그래픽은 보통 2~16색이라
+ * 팔레트(색 인덱스) PNG로 쓰면 훨씬 작다 — 2색 폰트 시트 기준 19,856 → 2,214바이트.
+ * 색이 256개를 넘거나 CompressionStream이 없으면 null을 돌려주고 캔버스 인코딩을 쓴다.
+ */
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function pngChunk(type, body) {
+  const out = new Uint8Array(12 + body.length);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, body.length);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(body, 8);
+  dv.setUint32(8 + body.length, crc32(out.subarray(4, 8 + body.length)));
+  return out;
+}
+
+// ImageData → 팔레트 PNG 바이트 (색 256개 초과면 null)
+async function encodeIndexedPNG(imgData) {
+  const { width: w, height: h, data } = imgData;
+  const px32 = new Uint32Array(data.buffer, data.byteOffset, w * h);
+  const map = new Map();
+  const colors = [];
+  const idx = new Uint8Array(w * h);
+  for (let i = 0; i < px32.length; i++) {
+    const key = px32[i];
+    let v = map.get(key);
+    if (v === undefined) {
+      if (colors.length >= 256) return null;      // 사진 등 → 캔버스 인코딩으로
+      v = colors.length;
+      map.set(key, v);
+      colors.push(key);
+    }
+    idx[i] = v;
+  }
+  const n = colors.length;
+  const depth = n <= 2 ? 1 : n <= 4 ? 2 : n <= 16 ? 4 : 8;
+  const perByte = 8 / depth;
+  const stride = Math.ceil(w / perByte);
+
+  const raw = new Uint8Array((stride + 1) * h);
+  for (let y = 0; y < h; y++) {
+    const rowStart = y * (stride + 1);
+    raw[rowStart] = 0;                            // 필터 없음
+    for (let x = 0; x < w; x++) {
+      const v = idx[y * w + x];
+      if (depth === 8) raw[rowStart + 1 + x] = v;
+      else raw[rowStart + 1 + Math.floor(x / perByte)] |= v << (8 - depth * ((x % perByte) + 1));
+    }
+  }
+  const deflated = await zlibDeflate(raw);
+  if (!deflated) return null;                     // CompressionStream 미지원
+
+  const plte = new Uint8Array(n * 3);
+  const trns = new Uint8Array(n);
+  let hasAlpha = false;
+  for (let i = 0; i < n; i++) {
+    const c = colors[i];                          // 리틀엔디언 RGBA
+    plte[i * 3] = c & 0xFF;
+    plte[i * 3 + 1] = (c >>> 8) & 0xFF;
+    plte[i * 3 + 2] = (c >>> 16) & 0xFF;
+    trns[i] = (c >>> 24) & 0xFF;
+    if (trns[i] !== 255) hasAlpha = true;
+  }
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, w); dv.setUint32(4, h);
+  ihdr[8] = depth; ihdr[9] = 3;                   // 색 타입 3 = 팔레트
+
+  const parts = [
+    new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('PLTE', plte),
+  ];
+  if (hasAlpha) parts.push(pngChunk('tRNS', trns));
+  parts.push(pngChunk('IDAT', deflated), pngChunk('IEND', new Uint8Array(0)));
+
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
+}
+
 // 이미지를 2048px 상한으로 정규화해 PNG base64로 (분절 상한과 동일하게 맞춘다)
-function imageToPngB64(img) {
+async function imageToPngB64(img) {
   const scale = Math.min(1, 2048 / Math.max(img.width, img.height));
   const w = Math.max(1, Math.round(img.width * scale));
   const h = Math.max(1, Math.round(img.height * scale));
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
-  const cc = c.getContext('2d');
+  const cc = c.getContext('2d', { willReadFrequently: true });
   cc.imageSmoothingEnabled = false;
   cc.drawImage(img, 0, 0, w, h);
-  return c.toDataURL('image/png').split(',')[1];
+  const canvasB64 = c.toDataURL('image/png').split(',')[1];
+  // 팔레트 PNG로 다시 써 보고 더 작은 쪽을 올린다 (타일 그래픽은 보통 크게 줄어든다)
+  try {
+    const indexed = await encodeIndexedPNG(cc.getImageData(0, 0, w, h));
+    if (indexed && indexed.length * 4 / 3 < canvasB64.length) return bytesToB64(indexed);
+  } catch (_) { /* 실패하면 캔버스 인코딩 사용 */ }
+  return canvasB64;
 }
 
 function loadImage(src) {
@@ -2052,7 +2156,7 @@ $('gh-asset-upload').addEventListener('change', async (e) => {
       const url = URL.createObjectURL(f);
       const img = await loadImage(url);
       URL.revokeObjectURL(url);
-      const b64 = imageToPngB64(img);
+      const b64 = await imageToPngB64(img);
       const name = f.name.replace(/\.[^.]+$/, '') + '.png';
       const path = `assets/${folder}/${name}`;
       const existing = await ghGetFile(path).catch(() => null);
