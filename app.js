@@ -883,6 +883,8 @@ function writeFloating(f) {
 function commitFloating() {
   const f = state.floating;
   if (!f) return;
+  // 새로 삽입한 것은 아직 셀을 바꾼 적이 없으므로 여기서 undo를 쌓는다
+  if (f.needUndo) pushUndo();
   writeFloating(f);
   state.floating = null;
   updateSelectionBar();
@@ -1835,20 +1837,21 @@ $('btn-source-toggle').addEventListener('click', (e) => {
 });
 
 $('btn-place').addEventListener('click', () => {
-  // 소스 전체를 활성 레이어 (0,0)에 배치
+  // 소스 전체를 캔버스 가운데에 띄운다 — 드래그로 위치를 잡고 "확정"을 누르면 들어간다
   const src = state.source;
   if (!src) return;
   commitFloating();
-  pushUndo();
-  const cells = activeCells();
-  for (let y = 0; y < Math.min(src.h, state.gridH); y++) {
-    for (let x = 0; x < Math.min(src.w, state.gridW); x++) {
-      const t = src.cells[y * src.w + x];
-      if (t >= 0) cells[y * state.gridW + x] = t;
-    }
-  }
+  const layers = { [state.activeLayer]: Int32Array.from(src.cells) };
+  state.floating = {
+    x: Math.max(0, Math.floor((state.gridW - src.w) / 2)),
+    y: Math.max(0, Math.floor((state.gridH - src.h) / 2)),
+    w: src.w, h: src.h,
+    layers, canvas: buildFloatCanvas(layers, src.w, src.h),
+    needUndo: true,
+  };
+  setTool('select');        // 손가락으로 끌어 옮길 수 있게
+  updateSelectionBar();
   renderAll();
-  autosaveSoon();
 });
 
 /* ===== 에셋 브라우저 ===== */
