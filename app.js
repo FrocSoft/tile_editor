@@ -347,15 +347,20 @@ let sourceMeta = null;          // 현재 소스의 원본 이미지·페이징 
 
 async function sliceImage(img, name) {
   const seq = ++sliceSeq;
-  let w = img.naturalWidth || img.width;
-  let h = img.naturalHeight || img.height;
-  const scaleDown = Math.min(1, 2048 / Math.max(w, h));
-  w = Math.max(TILE, Math.floor((w * scaleDown) / TILE) * TILE);
-  h = Math.max(TILE, Math.floor((h * scaleDown) / TILE) * TILE);
+  const iw = img.naturalWidth || img.width;
+  const ih = img.naturalHeight || img.height;
+  // 2048px를 넘을 때만 축소하되 가로·세로를 같은 배율로 — 비율이 변하면 안 된다
+  const scale = Math.min(1, 2048 / Math.max(iw, ih));
+  const dw = Math.max(1, Math.round(iw * scale));
+  const dh = Math.max(1, Math.round(ih * scale));
+  // 타일 격자에 맞추는 건 "늘려서"가 아니라 남는 자리를 투명하게 두는 방식으로.
+  // 내림으로 맞추면 8의 배수가 아닌 이미지가 찌그러지고 픽셀 줄이 버려진다.
+  const w = Math.max(TILE, Math.ceil(dw / TILE) * TILE);
+  const h = Math.max(TILE, Math.ceil(dh / TILE) * TILE);
   const gw = w / TILE, gh = h / TILE;
   const rowsPerPage = Math.max(1, Math.min(gh, Math.floor(PAGE_TILE_BUDGET / gw)));
   sourceMeta = {
-    img, name, w, h, gw, gh, rowsPerPage,
+    img, name, w, h, dw, dh, gw, gh, rowsPerPage,
     pageCount: Math.ceil(gh / rowsPerPage),
   };
   await slicePage(0, seq);
@@ -373,9 +378,15 @@ async function slicePage(pageIdx, seq = ++sliceSeq) {
   cc.imageSmoothingEnabled = false;
   const iw = m.img.naturalWidth || m.img.width;
   const ih = m.img.naturalHeight || m.img.height;
-  cc.drawImage(m.img,
-    0, rowStart * TILE * (ih / m.h), iw, rows * TILE * (ih / m.h),
-    0, 0, m.w, rows * TILE);
+  // 이 페이지가 덮는 구간 중 이미지가 실제로 있는 부분만 그린다 (나머지는 투명 패딩)
+  const y0 = rowStart * TILE;
+  const top = Math.max(0, Math.min(m.dh, y0));
+  const bottom = Math.max(0, Math.min(m.dh, y0 + rows * TILE));
+  if (bottom > top) {
+    const sy = top * (ih / m.dh);
+    const sh = (bottom - top) * (ih / m.dh);
+    cc.drawImage(m.img, 0, sy, iw, sh, 0, top - y0, m.dw, bottom - top);
+  }
   const buf = cc.getImageData(0, 0, m.w, rows * TILE).data;
   c.width = c.height = 0;   // 임시 캔버스 메모리 즉시 반환 (iOS)
   const cells = new Int32Array(m.gw * rows);
