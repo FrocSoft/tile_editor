@@ -2249,18 +2249,39 @@ $('gh-asset-upload').addEventListener('change', async (e) => {
 
 let importObjectUrl = null;   // 페이지 넘김 시 재사용하므로 다음 가져오기 전까지 유지
 
-$('file-input').addEventListener('change', (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  if (importObjectUrl) URL.revokeObjectURL(importObjectUrl);
-  importObjectUrl = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = () => {
-    sliceImage(img, file.name.replace(/\.[^.]+$/, ''));
-    closeDrawers();
-  };
-  img.src = importObjectUrl;
+$('file-input').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []).sort((a, b) => a.name.localeCompare(b.name));
   e.target.value = '';
+  if (!files.length) return;
+  const baseName = (f) => f.name.replace(/\.[^.]+$/, '');
+
+  if (files.length === 1) {
+    if (importObjectUrl) URL.revokeObjectURL(importObjectUrl);
+    importObjectUrl = URL.createObjectURL(files[0]);
+    const img = new Image();
+    img.onload = () => {
+      sliceImage(img, baseName(files[0]));
+      closeDrawers();
+    };
+    img.src = importObjectUrl;
+    return;
+  }
+
+  // 여러 장이면 폴더와 같은 방식으로 한 시트에 이어붙인다
+  const imgs = [];
+  const urls = [];
+  try {
+    for (const f of files) {
+      const url = URL.createObjectURL(f);
+      urls.push(url);
+      imgs.push(await loadImage(url));
+    }
+    await composeFolderSheet(imgs, `${baseName(files[0])} 외 ${files.length - 1}장`);
+  } catch (_) {
+    alert('이미지를 읽지 못했습니다.');
+  } finally {
+    for (const u of urls) URL.revokeObjectURL(u);
+  }
 });
 
 /* ===== 도구/레이어/크기 UI ===== */
