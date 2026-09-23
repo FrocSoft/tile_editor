@@ -496,6 +496,37 @@ function redo() {
 }
 
 /* ===== 캔버스 크기 조절 (1타일 단위) ===== */
+/* 가로↔세로 전환: 캔버스를 통째로 90° 돌린다.
+ * 칸 위치뿐 아니라 타일 속 픽셀도 같이 돌려야 그림이 온전히 보존된다.
+ */
+function rotateCanvas() {
+  commitFloating();
+  pushUndo();
+  const w = state.gridW, h = state.gridH;
+  const rotate = (src) => {
+    const out = new Int32Array(w * h).fill(-1);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        // 시계 방향: (x,y) → (h-1-y, x) — 새 격자는 가로 h, 세로 w
+        out[x * h + (h - 1 - y)] = transformTile(src[y * w + x], 'rot90');
+      }
+    }
+    return out;
+  };
+  state.bg = rotate(state.bg);
+  state.sprite = rotate(state.sprite);
+  state.gridW = h;
+  state.gridH = w;
+  state.sel = null;
+  updateSelectionBar();
+  updateSizeLabel();
+  fitView();
+  renderAll();
+  autosaveSoon();
+}
+
+$('btn-rotate-canvas').addEventListener('click', rotateCanvas);
+
 function resizeGrid(newW, newH) {
   newW = Math.min(MAX_GRID, Math.max(MIN_GRID, newW));
   newH = Math.min(MAX_GRID, Math.max(MIN_GRID, newH));
